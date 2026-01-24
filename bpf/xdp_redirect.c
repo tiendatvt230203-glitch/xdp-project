@@ -1,5 +1,11 @@
 // XDP Program - Redirect packets to AF_XDP socket
-// Only redirect packets with destination IP outside LOCAL subnet
+//
+// LOGIC:
+// 1. ARP packets           -> PASS (để kernel trả lời ARP cho client)
+// 2. Broadcast/Multicast   -> PASS (DHCP, ARP broadcast, etc.)
+// 3. dst_ip IN LOCAL net   -> PASS (packet đến server hoặc client cùng LAN)
+// 4. dst_ip OUT LOCAL net  -> REDIRECT (packet cần forward qua WAN)
+//
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -15,15 +21,27 @@ struct {
     __type(value, int);
 } xsks_map SEC(".maps");
 
-// Config map for LOCAL subnet
-// Key 0: local_ip (network address, e.g., 192.168.9.0)
-// Key 1: local_mask (e.g., 0xFFFFFF00 for /24)
+// Config map for LOCAL network
+// Key 0: local_network (e.g., 192.168.9.0)
+// Key 1: local_netmask (e.g., 255.255.255.0)
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 2);
     __type(key, int);
     __type(value, __u32);
 } config_map SEC(".maps");
+
+// Check if MAC is broadcast (ff:ff:ff:ff:ff:ff)
+static __always_inline int is_broadcast_mac(unsigned char *mac)
+{
+    return (mac[0] & mac[1] & mac[2] & mac[3] & mac[4] & mac[5]) == 0xff;
+}
+
+// Check if MAC is multicast (bit 0 of first byte is 1)
+static __always_inline int is_multicast_mac(unsigned char *mac)
+{
+    return mac[0] & 0x01;
+}
 
 SEC("xdp")
 int xdp_redirect_prog(struct xdp_md *ctx)
@@ -36,7 +54,18 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // Only handle IPv4
+    // ===== RULE 1: ARP -> PASS =====
+    // Client cần ARP để lấy MAC của gateway
+    // Nếu không PASS, client sẽ không bao giờ gửi được packet!
+    if (eth->h_proto == bpf_htons(ETH_P_ARP))
+        return XDP_PASS;
+
+    // ===== RULE 2: Broadcast/Multicast -> PASS =====
+    // DHCP, ARP broadcast, IGMP, etc.
+    if (is_broadcast_mac(eth->h_dest) || is_multicast_mac(eth->h_dest))
+        return XDP_PASS;
+
+    // ===== Chỉ xử lý IPv4 =====
     if (eth->h_proto != bpf_htons(ETH_P_IP))
         return XDP_PASS;
 
@@ -45,32 +74,31 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    // Get LOCAL subnet config from map
+    // Get LOCAL network config
     int key0 = 0, key1 = 1;
-    __u32 *local_net = bpf_map_lookup_elem(&config_map, &key0);
-    __u32 *local_mask = bpf_map_lookup_elem(&config_map, &key1);
+    __u32 *local_network = bpf_map_lookup_elem(&config_map, &key0);
+    __u32 *local_netmask = bpf_map_lookup_elem(&config_map, &key1);
 
-    if (!local_net || !local_mask) {
-        // No config, pass all packets
+    // Nếu config chưa load -> PASS (an toàn)
+    if (!local_network || !local_netmask)
         return XDP_PASS;
-    }
 
-    // Get destination IP
+    // Tính network của destination IP
     __u32 dst_ip = ip->daddr;
+    __u32 dst_network = dst_ip & *local_netmask;
 
-    // Check if destination is in LOCAL subnet
-    // If (dst_ip & mask) == local_net -> same subnet -> XDP_PASS
-    // If different subnet -> redirect to userspace
-    if ((dst_ip & *local_mask) == *local_net) {
-        // Destination is in LOCAL subnet, let kernel handle it
+    // ===== RULE 3: dst_ip IN LOCAL network -> PASS =====
+    // Packet gửi đến server (SSH, ping) hoặc client khác trong LAN
+    if (dst_network == *local_network)
         return XDP_PASS;
-    }
 
-    // Destination is outside LOCAL subnet, redirect to AF_XDP
+    // ===== RULE 4: dst_ip OUT LOCAL network -> REDIRECT =====
+    // Packet cần forward qua WAN đến network khác
     int index = ctx->rx_queue_index;
     if (bpf_map_lookup_elem(&xsks_map, &index))
         return bpf_redirect_map(&xsks_map, index, 0);
 
+    // Nếu không có socket trong map -> PASS (an toàn)
     return XDP_PASS;
 }
 

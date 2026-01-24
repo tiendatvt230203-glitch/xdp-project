@@ -7,32 +7,40 @@
 #define MAX_INTERFACES 16
 #define MAC_LEN 6
 
-// Interface type
-#define IFACE_TYPE_LOCAL  1  // Receive via XDP redirect
-#define IFACE_TYPE_WAN    2  // Send out
+// LOCAL interface config
+struct local_config {
+    char ifname[IF_NAMESIZE];      // Interface name (enp7s0)
+    uint32_t ip;                   // IP address
+    uint32_t netmask;              // Netmask
+    uint32_t network;              // Network (ip & netmask)
+    uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
+    uint8_t dst_mac[MAC_LEN];      // Dest MAC (client on other side)
+};
 
-// Interface config entry
-struct iface_config {
-    int type;                      // LOCAL or WAN
-    char ifname[IF_NAMESIZE];      // Interface name
-    uint8_t mac[MAC_LEN];          // MAC address
-    uint32_t ip;                   // IP address (network byte order)
-    uint32_t netmask;              // Netmask (network byte order)
-    uint32_t network;              // Network address (ip & netmask)
-    int enabled;                   // Is enabled
+// WAN interface config
+struct wan_config {
+    char ifname[IF_NAMESIZE];      // Interface name (enp5s0)
+    uint32_t ip;                   // IP address
+    uint32_t netmask;              // Netmask
+    uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
+    uint8_t dst_mac[MAC_LEN];      // Dest MAC (server on other side)
 };
 
 // Global config
 struct app_config {
-    struct iface_config locals[MAX_INTERFACES];
-    int local_count;
+    // LOCAL interface
+    struct local_config local;
 
-    struct iface_config wans[MAX_INTERFACES];
+    // REMOTE network - packets to this network will be REDIRECT
+    uint32_t remote_network;       // e.g., 192.168.182.0
+    uint32_t remote_netmask;       // e.g., 255.255.255.0
+
+    // WAN interfaces
+    struct wan_config wans[MAX_INTERFACES];
     int wan_count;
 
-    uint8_t gateway_mac[MAC_LEN];  // Gateway MAC for WAN
-
-    char bpf_file[256];            // BPF program file
+    // BPF program file
+    char bpf_file[256];
 };
 
 // Parse config file
