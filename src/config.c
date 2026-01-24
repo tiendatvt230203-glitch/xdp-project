@@ -182,10 +182,6 @@ int config_load(struct app_config *cfg, const char *filename)
         fprintf(stderr, "No LOCAL interface defined\n");
         return -1;
     }
-    if (cfg->remote_network == 0) {
-        fprintf(stderr, "No REMOTE network defined\n");
-        return -1;
-    }
     if (cfg->wan_count == 0) {
         fprintf(stderr, "No WAN interface defined\n");
         return -1;
@@ -209,12 +205,6 @@ void config_print(struct app_config *cfg)
     printf("║   Network: %-52s ║\n", ip_to_str(cfg->local.network, ip_buf, sizeof(ip_buf)));
     printf("║   SRC MAC: %-52s ║\n", mac_to_str(cfg->local.src_mac, mac_buf, sizeof(mac_buf)));
     printf("║   DST MAC: %-52s ║\n", mac_to_str(cfg->local.dst_mac, mac_buf2, sizeof(mac_buf2)));
-
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-
-    // REMOTE
-    printf("║ REMOTE Network: %-46s ║\n", ip_to_str(cfg->remote_network, ip_buf, sizeof(ip_buf)));
-    printf("║   Packets to this network -> REDIRECT to userspace          ║\n");
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
