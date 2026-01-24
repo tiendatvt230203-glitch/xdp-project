@@ -81,13 +81,18 @@ void forwarder_run(struct forwarder *fwd)
             continue;
 
         // Forward each packet to WAN
+        printf("[DEBUG] Received %d packets from LOCAL\n", rcvd);
         for (int i = 0; i < rcvd; i++) {
             struct xsk_interface *wan = get_wan(fwd);
 
+            printf("[DEBUG] Sending pkt %d (%u bytes) to %s\n", i, pkt_lens[i], wan->ifname);
+
             if (interface_send(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
                 fwd->total_forwarded++;
+                printf("[DEBUG] OK - forwarded\n");
             } else {
                 fwd->total_dropped++;
+                printf("[DEBUG] FAIL - dropped\n");
             }
         }
 

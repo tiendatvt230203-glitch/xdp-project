@@ -2,6 +2,7 @@
 #include <poll.h>
 #include <net/ethernet.h>
 #include <unistd.h>
+#include <errno.h>
 
 static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
@@ -310,8 +311,11 @@ int interface_send(struct xsk_interface *iface,
     uint32_t idx;
     struct ether_header *eth;
 
-    if (xsk_ring_prod__reserve(&iface->tx, 1, &idx) < 1)
+    int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
+    if (reserved < 1) {
+        printf("[TX] FAIL: Cannot reserve TX ring\n");
         return -1;
+    }
 
     // Copy packet to TX buffer
     memcpy(iface->bufs, pkt_data, pkt_len);
@@ -321,20 +325,31 @@ int interface_send(struct xsk_interface *iface,
     memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);  // Remote MAC
     memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);  // Local MAC
 
+    printf("[TX] Rewrite MAC: src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
+           eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
+           eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5],
+           eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],
+           eth->ether_dhost[3], eth->ether_dhost[4], eth->ether_dhost[5]);
+
     // Set TX descriptor
     xsk_ring_prod__tx_desc(&iface->tx, idx)->addr = 0;
     xsk_ring_prod__tx_desc(&iface->tx, idx)->len = pkt_len;
     xsk_ring_prod__submit(&iface->tx, 1);
 
     // Trigger send
-    sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+    int send_ret = sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+    if (send_ret < 0) {
+        printf("[TX] sendto failed: %s\n", strerror(errno));
+    }
 
     // Wait for completion
     uint32_t comp_idx;
     int retries = 1000;
     while (xsk_ring_cons__peek(&iface->comp, 1, &comp_idx) < 1) {
-        if (--retries == 0)
+        if (--retries == 0) {
+            printf("[TX] FAIL: Completion timeout\n");
             return -1;
+        }
         usleep(10);
     }
     xsk_ring_cons__release(&iface->comp, 1);
@@ -342,6 +357,7 @@ int interface_send(struct xsk_interface *iface,
     iface->tx_packets++;
     iface->tx_bytes += pkt_len;
 
+    printf("[TX] OK: Sent %u bytes\n", pkt_len);
     return 0;
 }
 

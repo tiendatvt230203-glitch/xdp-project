@@ -54,7 +54,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // ARP -> PASS (kernel trả lời ARP)
+    // ARP -> PASS
     if (eth->h_proto == bpf_htons(ETH_P_ARP))
         return XDP_PASS;
 
@@ -70,23 +70,20 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    // Lấy config LOCAL network
-    int key0 = 0, key1 = 1;
-    __u32 *local_network = bpf_map_lookup_elem(&config_map, &key0);
-    __u32 *local_netmask = bpf_map_lookup_elem(&config_map, &key1);
-    if (!local_network || !local_netmask)
+    // HARDCODE: 192.168.9.0/24 (network byte order)
+    // 192.168.9.0 = 0xC0A80900 big-endian = bytes [C0][A8][09][00]
+    // 255.255.255.0 = 0xFFFFFF00 big-endian
+    __u32 local_network = 0x0009A8C0;  // little-endian representation
+    __u32 local_netmask = 0x00FFFFFF;  // little-endian representation
+
+    __u32 dst_network = ip->daddr & local_netmask;
+
+    // dst IN LOCAL -> PASS
+    if (dst_network == local_network)
         return XDP_PASS;
 
-    // dst_ip thuộc LOCAL network -> PASS (đến server hoặc LAN)
-    __u32 dst_network = ip->daddr & *local_netmask;
-    if (dst_network == *local_network)
-        return XDP_PASS;
-
-    // dst_ip NGOÀI LOCAL network -> REDIRECT lên userspace (bypass kernel)
-    if (bpf_map_lookup_elem(&xsks_map, &index))
-        return bpf_redirect_map(&xsks_map, index, 0);
-
-    return XDP_PASS;
+    // dst OUT LOCAL -> REDIRECT
+    return bpf_redirect_map(&xsks_map, index, 0);
 }
 
 char _license[] SEC("license") = "GPL";
