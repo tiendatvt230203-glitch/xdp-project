@@ -1,7 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <bpf/libbpf.h>
 #include "config.h"
 #include "forwarder.h"
+
+// Suppress all libbpf logs except errors
+static int libbpf_print_silent(enum libbpf_print_level level,
+                               const char *format, va_list args)
+{
+    // Only print errors
+    if (level == LIBBPF_ERR)
+        return vfprintf(stderr, format, args);
+    return 0;
+}
 
 static void print_usage(const char *prog)
 {
@@ -31,6 +43,9 @@ int main(int argc, char **argv)
         }
         config_file = argv[1];
     }
+
+    // Suppress libbpf warnings
+    libbpf_set_print(libbpf_print_silent);
 
     printf("=================================\n");
     printf("   XDP Packet Forwarder v2.0\n");
