@@ -44,6 +44,10 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     }
 
     printf("\n[FWD] Ready! %d LOCAL, %d WAN interfaces\n", fwd->local_count, fwd->wan_count);
+    printf("[FWD] Load balancer: window size = %d bytes\n", LB_WINDOW_SIZE);
+    for (int i = 0; i < fwd->wan_count; i++) {
+        printf("[FWD] WAN[%d] = %s\n", i, fwd->wans[i].ifname);
+    }
 
     return 0;
 }
@@ -62,21 +66,25 @@ void forwarder_cleanup(struct forwarder *fwd)
 }
 
 // Get WAN interface using window-based load balancing
-// Each window (64KB) goes to one WAN before switching
+// Each window goes to one WAN before switching
 static struct xsk_interface *get_wan(struct forwarder *fwd, uint32_t pkt_len)
 {
-    struct xsk_interface *wan = &fwd->wans[fwd->current_wan];
-
-    // Add packet size to current window
+    // Add packet size to counter
     fwd->window_bytes += pkt_len;
 
-    // If window is full, switch to next WAN
+    // If window is full, switch to next WAN and reset counter
     if (fwd->window_bytes >= LB_WINDOW_SIZE) {
+        printf("[LB] Window full (%lu bytes)! Switching WAN[%d] -> WAN[%d]\n",
+               fwd->window_bytes,
+               fwd->current_wan,
+               (fwd->current_wan + 1) % fwd->wan_count);
+        fflush(stdout);
+
         fwd->current_wan = (fwd->current_wan + 1) % fwd->wan_count;
         fwd->window_bytes = 0;
     }
 
-    return wan;
+    return &fwd->wans[fwd->current_wan];
 }
 
 void forwarder_run(struct forwarder *fwd)

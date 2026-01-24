@@ -323,7 +323,8 @@ int interface_send(struct xsk_interface *iface,
     memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);  // Remote MAC
     memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);  // Local MAC
 
-    printf("[TX] Rewrite MAC: src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
+    printf("[TX] %s: src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
+           iface->ifname,
            eth->ether_shost[0], eth->ether_shost[1], eth->ether_shost[2],
            eth->ether_shost[3], eth->ether_shost[4], eth->ether_shost[5],
            eth->ether_dhost[0], eth->ether_dhost[1], eth->ether_dhost[2],

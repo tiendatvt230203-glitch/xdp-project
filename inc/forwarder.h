@@ -3,8 +3,9 @@
 
 #include "interface.h"
 
-// Window size for load balancing (64KB)
-#define LB_WINDOW_SIZE (64 * 1024)
+// Window size for load balancing
+// 3000 bytes for testing (~50 small packets or ~2 large packets)
+#define LB_WINDOW_SIZE 3000
 
 struct forwarder {
     // LOCAL interfaces (receive packets from clients)
