@@ -5,13 +5,13 @@
 #include "config.h"
 #include "forwarder.h"
 
-// Suppress all libbpf logs except errors
+// Suppress all libbpf logs
 static int libbpf_print_silent(enum libbpf_print_level level,
                                const char *format, va_list args)
 {
-    // Only print errors
-    if (level == LIBBPF_ERR)
-        return vfprintf(stderr, format, args);
+    (void)level;
+    (void)format;
+    (void)args;
     return 0;
 }
 
