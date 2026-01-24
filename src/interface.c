@@ -10,7 +10,8 @@ static int config_map_fd = -1;
 
 // Initialize LOCAL interface with XDP program
 int interface_init_local(struct xsk_interface *iface,
-                         const struct app_config *cfg)
+                         const struct local_config *local_cfg,
+                         const char *bpf_file)
 {
     int ret;
     struct bpf_program *prog;
@@ -19,13 +20,13 @@ int interface_init_local(struct xsk_interface *iface,
     uint32_t idx;
 
     memset(iface, 0, sizeof(*iface));
-    iface->ifindex = if_nametoindex(cfg->local.ifname);
-    strncpy(iface->ifname, cfg->local.ifname, IF_NAMESIZE - 1);
-    memcpy(iface->src_mac, cfg->local.src_mac, MAC_LEN);
-    memcpy(iface->dst_mac, cfg->local.dst_mac, MAC_LEN);
+    iface->ifindex = if_nametoindex(local_cfg->ifname);
+    strncpy(iface->ifname, local_cfg->ifname, IF_NAMESIZE - 1);
+    memcpy(iface->src_mac, local_cfg->src_mac, MAC_LEN);
+    memcpy(iface->dst_mac, local_cfg->dst_mac, MAC_LEN);
 
     if (iface->ifindex == 0) {
-        fprintf(stderr, "Interface %s not found\n", cfg->local.ifname);
+        fprintf(stderr, "Interface %s not found\n", local_cfg->ifname);
         return -1;
     }
 
@@ -47,20 +48,17 @@ int interface_init_local(struct xsk_interface *iface,
 
     // Load BPF object (only once)
     if (!bpf_obj) {
-        // Explicit path to XDP program
-        const char *xdp_obj_file = "bpf/xdp_redirect.o";
-
         // Check file exists before loading
-        if (access(xdp_obj_file, F_OK) != 0) {
-            fprintf(stderr, "ERROR: XDP object file not found: %s\n", xdp_obj_file);
-            fprintf(stderr, "Run: clang -O2 -target bpf -g -c bpf/xdp_redirect.c -o %s\n", xdp_obj_file);
+        if (access(bpf_file, F_OK) != 0) {
+            fprintf(stderr, "ERROR: XDP object file not found: %s\n", bpf_file);
+            fprintf(stderr, "Run: clang -O2 -target bpf -g -c bpf/xdp_redirect.c -o %s\n", bpf_file);
             goto err;
         }
 
-        printf("[XDP] Loading BPF object: %s\n", xdp_obj_file);
-        bpf_obj = bpf_object__open_file(xdp_obj_file, NULL);
+        printf("[XDP] Loading BPF object: %s\n", bpf_file);
+        bpf_obj = bpf_object__open_file(bpf_file, NULL);
         if (libbpf_get_error(bpf_obj)) {
-            fprintf(stderr, "Failed to open %s\n", xdp_obj_file);
+            fprintf(stderr, "Failed to open %s\n", bpf_file);
             bpf_obj = NULL;
             goto err;
         }
@@ -95,22 +93,22 @@ int interface_init_local(struct xsk_interface *iface,
         // Load LOCAL network into BPF map
         // XDP will PASS packets to LOCAL network, REDIRECT others
         int key0 = 0, key1 = 1;
-        ret = bpf_map_update_elem(config_map_fd, &key0, &cfg->local.network, 0);
+        ret = bpf_map_update_elem(config_map_fd, &key0, &local_cfg->network, 0);
         if (ret) {
             perror("bpf_map_update_elem local_network");
             goto err;
         }
-        ret = bpf_map_update_elem(config_map_fd, &key1, &cfg->local.netmask, 0);
+        ret = bpf_map_update_elem(config_map_fd, &key1, &local_cfg->netmask, 0);
         if (ret) {
             perror("bpf_map_update_elem local_netmask");
             goto err;
         }
 
         printf("[XDP] Filter loaded: LOCAL network %d.%d.%d.%d/%d.%d.%d.%d\n",
-               ((uint8_t*)&cfg->local.network)[0], ((uint8_t*)&cfg->local.network)[1],
-               ((uint8_t*)&cfg->local.network)[2], ((uint8_t*)&cfg->local.network)[3],
-               ((uint8_t*)&cfg->local.netmask)[0], ((uint8_t*)&cfg->local.netmask)[1],
-               ((uint8_t*)&cfg->local.netmask)[2], ((uint8_t*)&cfg->local.netmask)[3]);
+               ((uint8_t*)&local_cfg->network)[0], ((uint8_t*)&local_cfg->network)[1],
+               ((uint8_t*)&local_cfg->network)[2], ((uint8_t*)&local_cfg->network)[3],
+               ((uint8_t*)&local_cfg->netmask)[0], ((uint8_t*)&local_cfg->netmask)[1],
+               ((uint8_t*)&local_cfg->netmask)[2], ((uint8_t*)&local_cfg->netmask)[3]);
         printf("[XDP] Packets IN local network -> PASS | Packets OUT -> REDIRECT\n");
 
         // Attach XDP program

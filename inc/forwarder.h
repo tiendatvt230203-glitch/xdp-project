@@ -3,16 +3,21 @@
 
 #include "interface.h"
 
+// Window size for load balancing (64KB)
+#define LB_WINDOW_SIZE (64 * 1024)
+
 struct forwarder {
-    // LOCAL interface (receive packets from clients)
-    struct xsk_interface local;
+    // LOCAL interfaces (receive packets from clients)
+    struct xsk_interface locals[MAX_INTERFACES];
+    int local_count;
 
     // WAN interfaces (send packets to other servers)
     struct xsk_interface wans[MAX_INTERFACES];
     int wan_count;
 
-    // Round-robin index
-    int current_wan;
+    // Load balancer state
+    int current_wan;           // Current WAN index
+    uint64_t window_bytes;     // Bytes sent in current window
 
     // Stats
     uint64_t total_forwarded;

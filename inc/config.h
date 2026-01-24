@@ -26,12 +26,9 @@ struct wan_config {
 
 // Global config
 struct app_config {
-    // LOCAL interface
-    struct local_config local;
-
-    // REMOTE network - packets to this network will be REDIRECT
-    uint32_t remote_network;       // e.g., 192.168.182.0
-    uint32_t remote_netmask;       // e.g., 255.255.255.0
+    // LOCAL interfaces
+    struct local_config locals[MAX_INTERFACES];
+    int local_count;
 
     // WAN interfaces
     struct wan_config wans[MAX_INTERFACES];

@@ -104,39 +104,33 @@ int config_load(struct app_config *cfg, const char *filename)
         if (trimmed[0] == '#' || trimmed[0] == '\0')
             continue;
 
-        // Parse LOCAL: LOCAL <interface> <ip/mask> <src_mac> <dst_mac>
-        if (strncmp(trimmed, "LOCAL ", 6) == 0) {
+        // Parse LOCAL: LOCAL <interface> <network/mask> <src_mac> <dst_mac>
+        if (strncmp(trimmed, "LOCAL ", 6) == 0 && cfg->local_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], ip_cidr[64], src_mac_str[32], dst_mac_str[32];
-            if (sscanf(trimmed, "LOCAL %15s %63s %31s %31s", ifname, ip_cidr, src_mac_str, dst_mac_str) == 4) {
-                strncpy(cfg->local.ifname, ifname, IF_NAMESIZE - 1);
-                if (parse_ip_cidr(ip_cidr, &cfg->local.ip, &cfg->local.netmask, &cfg->local.network) != 0) {
-                    fprintf(stderr, "Invalid LOCAL IP: %s\n", ip_cidr);
+
+            if (sscanf(trimmed, "LOCAL %15s %63s %31s %31s",
+                       ifname, ip_cidr, src_mac_str, dst_mac_str) == 4) {
+
+                struct local_config *local = &cfg->locals[cfg->local_count];
+                strncpy(local->ifname, ifname, IF_NAMESIZE - 1);
+
+                if (parse_ip_cidr(ip_cidr, &local->ip, &local->netmask, &local->network) != 0) {
+                    fprintf(stderr, "Invalid LOCAL network: %s\n", ip_cidr);
                     fclose(fp);
                     return -1;
                 }
-                if (parse_mac(src_mac_str, cfg->local.src_mac) != 0) {
+                if (parse_mac(src_mac_str, local->src_mac) != 0) {
                     fprintf(stderr, "Invalid LOCAL src_mac: %s\n", src_mac_str);
                     fclose(fp);
                     return -1;
                 }
-                if (parse_mac(dst_mac_str, cfg->local.dst_mac) != 0) {
+                if (parse_mac(dst_mac_str, local->dst_mac) != 0) {
                     fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", dst_mac_str);
                     fclose(fp);
                     return -1;
                 }
-            }
-            continue;
-        }
 
-        // Parse REMOTE: REMOTE <network/mask>
-        if (strncmp(trimmed, "REMOTE ", 7) == 0) {
-            char network_cidr[64];
-            if (sscanf(trimmed, "REMOTE %63s", network_cidr) == 1) {
-                if (parse_network(network_cidr, &cfg->remote_network, &cfg->remote_netmask) != 0) {
-                    fprintf(stderr, "Invalid REMOTE network: %s\n", network_cidr);
-                    fclose(fp);
-                    return -1;
-                }
+                cfg->local_count++;
             }
             continue;
         }
@@ -178,7 +172,7 @@ int config_load(struct app_config *cfg, const char *filename)
     fclose(fp);
 
     // Validate
-    if (cfg->local.ifname[0] == '\0') {
+    if (cfg->local_count == 0) {
         fprintf(stderr, "No LOCAL interface defined\n");
         return -1;
     }
@@ -199,12 +193,17 @@ void config_print(struct app_config *cfg)
     printf("║                    XDP FORWARDER CONFIG                      ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
-    // LOCAL
-    printf("║ LOCAL Interface: %-44s ║\n", cfg->local.ifname);
-    printf("║   IP:      %-52s ║\n", ip_to_str(cfg->local.ip, ip_buf, sizeof(ip_buf)));
-    printf("║   Network: %-52s ║\n", ip_to_str(cfg->local.network, ip_buf, sizeof(ip_buf)));
-    printf("║   SRC MAC: %-52s ║\n", mac_to_str(cfg->local.src_mac, mac_buf, sizeof(mac_buf)));
-    printf("║   DST MAC: %-52s ║\n", mac_to_str(cfg->local.dst_mac, mac_buf2, sizeof(mac_buf2)));
+    // LOCALs
+    printf("║ LOCAL Interfaces: %d                                          ║\n", cfg->local_count);
+    for (int i = 0; i < cfg->local_count; i++) {
+        struct local_config *local = &cfg->locals[i];
+        printf("╟──────────────────────────────────────────────────────────────╢\n");
+        printf("║ [%d] %-58s ║\n", i, local->ifname);
+        printf("║   Network: %-52s ║\n", ip_to_str(local->network, ip_buf, sizeof(ip_buf)));
+        printf("║   Netmask: %-52s ║\n", ip_to_str(local->netmask, ip_buf2, sizeof(ip_buf2)));
+        printf("║   SRC MAC: %-52s ║\n", mac_to_str(local->src_mac, mac_buf, sizeof(mac_buf)));
+        printf("║   DST MAC: %-52s ║\n", mac_to_str(local->dst_mac, mac_buf2, sizeof(mac_buf2)));
+    }
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 

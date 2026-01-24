@@ -34,7 +34,8 @@ struct xsk_interface {
 
 // Initialize LOCAL interface (RX with XDP redirect)
 int interface_init_local(struct xsk_interface *iface,
-                         const struct app_config *cfg);
+                         const struct local_config *local_cfg,
+                         const char *bpf_file);
 
 // Initialize WAN interface (TX for forwarding)
 int interface_init_wan(struct xsk_interface *iface,

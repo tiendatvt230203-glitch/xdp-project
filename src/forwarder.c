@@ -1,5 +1,6 @@
 #include "../inc/forwarder.h"
 #include <signal.h>
+#include <poll.h>
 
 static volatile int running = 1;
 
@@ -27,15 +28,22 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fwd->wan_count++;
     }
 
-    // Initialize LOCAL interface
-    if (interface_init_local(&fwd->local, cfg) != 0) {
-        fprintf(stderr, "Failed to init LOCAL %s\n", cfg->local.ifname);
-        for (int j = 0; j < fwd->wan_count; j++)
-            interface_cleanup(&fwd->wans[j]);
-        return -1;
+    // Initialize LOCAL interfaces
+    for (int i = 0; i < cfg->local_count; i++) {
+        if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
+            fprintf(stderr, "Failed to init LOCAL %s\n", cfg->locals[i].ifname);
+            // Cleanup WANs
+            for (int j = 0; j < fwd->wan_count; j++)
+                interface_cleanup(&fwd->wans[j]);
+            // Cleanup already initialized LOCALs
+            for (int j = 0; j < i; j++)
+                interface_cleanup(&fwd->locals[j]);
+            return -1;
+        }
+        fwd->local_count++;
     }
 
-    printf("\n[FWD] Ready! 1 LOCAL, %d WAN interfaces\n", fwd->wan_count);
+    printf("\n[FWD] Ready! %d LOCAL, %d WAN interfaces\n", fwd->local_count, fwd->wan_count);
 
     return 0;
 }
@@ -44,7 +52,8 @@ void forwarder_cleanup(struct forwarder *fwd)
 {
     printf("\n[FWD] Cleaning up...\n");
 
-    interface_cleanup(&fwd->local);
+    for (int i = 0; i < fwd->local_count; i++)
+        interface_cleanup(&fwd->locals[i]);
 
     for (int i = 0; i < fwd->wan_count; i++)
         interface_cleanup(&fwd->wans[i]);
@@ -52,10 +61,21 @@ void forwarder_cleanup(struct forwarder *fwd)
     printf("[FWD] Cleanup complete\n");
 }
 
-static struct xsk_interface *get_wan(struct forwarder *fwd)
+// Get WAN interface using window-based load balancing
+// Each window (64KB) goes to one WAN before switching
+static struct xsk_interface *get_wan(struct forwarder *fwd, uint32_t pkt_len)
 {
     struct xsk_interface *wan = &fwd->wans[fwd->current_wan];
-    fwd->current_wan = (fwd->current_wan + 1) % fwd->wan_count;
+
+    // Add packet size to current window
+    fwd->window_bytes += pkt_len;
+
+    // If window is full, switch to next WAN
+    if (fwd->window_bytes >= LB_WINDOW_SIZE) {
+        fwd->current_wan = (fwd->current_wan + 1) % fwd->wan_count;
+        fwd->window_bytes = 0;
+    }
+
     return wan;
 }
 
@@ -75,29 +95,28 @@ void forwarder_run(struct forwarder *fwd)
     uint64_t last_print = 0;
 
     while (running) {
-        // Receive packets from LOCAL
-        int rcvd = interface_recv(&fwd->local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
-        if (rcvd == 0)
-            continue;
+        // Poll from all LOCAL interfaces
+        for (int local_idx = 0; local_idx < fwd->local_count; local_idx++) {
+            struct xsk_interface *local = &fwd->locals[local_idx];
 
-        // Forward each packet to WAN
-        printf("[DEBUG] Received %d packets from LOCAL\n", rcvd);
-        for (int i = 0; i < rcvd; i++) {
-            struct xsk_interface *wan = get_wan(fwd);
+            int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
+            if (rcvd == 0)
+                continue;
 
-            printf("[DEBUG] Sending pkt %d (%u bytes) to %s\n", i, pkt_lens[i], wan->ifname);
+            // Forward each packet to WAN (window-based load balancing)
+            for (int i = 0; i < rcvd; i++) {
+                struct xsk_interface *wan = get_wan(fwd, pkt_lens[i]);
 
-            if (interface_send(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
-                fwd->total_forwarded++;
-                printf("[DEBUG] OK - forwarded\n");
-            } else {
-                fwd->total_dropped++;
-                printf("[DEBUG] FAIL - dropped\n");
+                if (interface_send(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
+                    fwd->total_forwarded++;
+                } else {
+                    fwd->total_dropped++;
+                }
             }
-        }
 
-        // Release buffers
-        interface_recv_release(&fwd->local, addrs, rcvd);
+            // Release buffers
+            interface_recv_release(local, addrs, rcvd);
+        }
 
         // Print stats every 1000 packets
         if (fwd->total_forwarded - last_print >= 1000) {
@@ -120,7 +139,9 @@ void forwarder_print_stats(struct forwarder *fwd)
     printf("║ Total Dropped:   %-29lu ║\n", fwd->total_dropped);
     printf("╟────────────────────────────────────────────────╢\n");
 
-    interface_print_stats(&fwd->local);
+    for (int i = 0; i < fwd->local_count; i++)
+        interface_print_stats(&fwd->locals[i]);
+
     for (int i = 0; i < fwd->wan_count; i++)
         interface_print_stats(&fwd->wans[i]);
 
