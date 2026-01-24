@@ -1,6 +1,7 @@
 #include "../inc/interface.h"
 #include <poll.h>
 #include <net/ethernet.h>
+#include <unistd.h>
 
 static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
@@ -45,9 +46,20 @@ int interface_init_local(struct xsk_interface *iface,
 
     // Load BPF object (only once)
     if (!bpf_obj) {
-        bpf_obj = bpf_object__open_file(cfg->bpf_file, NULL);
+        // Explicit path to XDP program
+        const char *xdp_obj_file = "bpf/xdp_redirect.o";
+
+        // Check file exists before loading
+        if (access(xdp_obj_file, F_OK) != 0) {
+            fprintf(stderr, "ERROR: XDP object file not found: %s\n", xdp_obj_file);
+            fprintf(stderr, "Run: clang -O2 -target bpf -g -c bpf/xdp_redirect.c -o %s\n", xdp_obj_file);
+            goto err;
+        }
+
+        printf("[XDP] Loading BPF object: %s\n", xdp_obj_file);
+        bpf_obj = bpf_object__open_file(xdp_obj_file, NULL);
         if (libbpf_get_error(bpf_obj)) {
-            fprintf(stderr, "Failed to open %s\n", cfg->bpf_file);
+            fprintf(stderr, "Failed to open %s\n", xdp_obj_file);
             bpf_obj = NULL;
             goto err;
         }
