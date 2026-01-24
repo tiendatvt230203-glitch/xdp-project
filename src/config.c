@@ -141,22 +141,15 @@ int config_load(struct app_config *cfg, const char *filename)
             continue;
         }
 
-        // Parse WAN: WAN <interface> <ip/mask> <src_mac> <dst_mac>
+        // Parse WAN: WAN <interface> <src_mac> <dst_mac>
         if (strncmp(trimmed, "WAN ", 4) == 0 && cfg->wan_count < MAX_INTERFACES) {
-            char ifname[IF_NAMESIZE], ip_cidr[64], src_mac_str[32], dst_mac_str[32];
+            char ifname[IF_NAMESIZE], src_mac_str[32], dst_mac_str[32];
 
-            if (sscanf(trimmed, "WAN %15s %63s %31s %31s",
-                       ifname, ip_cidr, src_mac_str, dst_mac_str) == 4) {
+            if (sscanf(trimmed, "WAN %15s %31s %31s",
+                       ifname, src_mac_str, dst_mac_str) == 3) {
 
                 struct wan_config *wan = &cfg->wans[cfg->wan_count];
                 strncpy(wan->ifname, ifname, IF_NAMESIZE - 1);
-
-                uint32_t unused_network;
-                if (parse_ip_cidr(ip_cidr, &wan->ip, &wan->netmask, &unused_network) != 0) {
-                    fprintf(stderr, "Invalid WAN IP: %s\n", ip_cidr);
-                    fclose(fp);
-                    return -1;
-                }
 
                 if (parse_mac(src_mac_str, wan->src_mac) != 0) {
                     fprintf(stderr, "Invalid WAN src_mac: %s\n", src_mac_str);
@@ -231,7 +224,6 @@ void config_print(struct app_config *cfg)
         struct wan_config *wan = &cfg->wans[i];
         printf("╟──────────────────────────────────────────────────────────────╢\n");
         printf("║ [%d] %-58s ║\n", i, wan->ifname);
-        printf("║   IP:      %-52s ║\n", ip_to_str(wan->ip, ip_buf, sizeof(ip_buf)));
         printf("║   SRC MAC: %-52s ║\n", mac_to_str(wan->src_mac, mac_buf, sizeof(mac_buf)));
         printf("║   DST MAC: %-52s ║\n", mac_to_str(wan->dst_mac, mac_buf2, sizeof(mac_buf2)));
     }

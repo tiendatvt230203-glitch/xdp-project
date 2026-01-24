@@ -48,57 +48,44 @@ int xdp_redirect_prog(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
+    int index = ctx->rx_queue_index;
 
-    // Parse Ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // ===== RULE 1: ARP -> PASS =====
-    // Client cần ARP để lấy MAC của gateway
-    // Nếu không PASS, client sẽ không bao giờ gửi được packet!
+    // ARP -> PASS (kernel trả lời ARP)
     if (eth->h_proto == bpf_htons(ETH_P_ARP))
         return XDP_PASS;
 
-    // ===== RULE 2: Broadcast/Multicast -> PASS =====
-    // DHCP, ARP broadcast, IGMP, etc.
+    // Broadcast/Multicast -> PASS
     if (is_broadcast_mac(eth->h_dest) || is_multicast_mac(eth->h_dest))
         return XDP_PASS;
 
-    // ===== Chỉ xử lý IPv4 =====
+    // Không phải IPv4 -> PASS
     if (eth->h_proto != bpf_htons(ETH_P_IP))
         return XDP_PASS;
 
-    // Parse IP header
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    // Get LOCAL network config
+    // Lấy config LOCAL network
     int key0 = 0, key1 = 1;
     __u32 *local_network = bpf_map_lookup_elem(&config_map, &key0);
     __u32 *local_netmask = bpf_map_lookup_elem(&config_map, &key1);
-
-    // Nếu config chưa load -> PASS (an toàn)
     if (!local_network || !local_netmask)
         return XDP_PASS;
 
-    // Tính network của destination IP
-    __u32 dst_ip = ip->daddr;
-    __u32 dst_network = dst_ip & *local_netmask;
-
-    // ===== RULE 3: dst_ip IN LOCAL network -> PASS =====
-    // Packet gửi đến server (SSH, ping) hoặc client khác trong LAN
+    // dst_ip thuộc LOCAL network -> PASS (đến server hoặc LAN)
+    __u32 dst_network = ip->daddr & *local_netmask;
     if (dst_network == *local_network)
         return XDP_PASS;
 
-    // ===== RULE 4: dst_ip OUT LOCAL network -> REDIRECT =====
-    // Packet cần forward qua WAN đến network khác
-    int index = ctx->rx_queue_index;
+    // dst_ip NGOÀI LOCAL network -> REDIRECT lên userspace (bypass kernel)
     if (bpf_map_lookup_elem(&xsks_map, &index))
         return bpf_redirect_map(&xsks_map, index, 0);
 
-    // Nếu không có socket trong map -> PASS (an toàn)
     return XDP_PASS;
 }
 

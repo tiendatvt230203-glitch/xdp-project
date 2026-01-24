@@ -20,10 +20,8 @@ struct local_config {
 // WAN interface config
 struct wan_config {
     char ifname[IF_NAMESIZE];      // Interface name (enp5s0)
-    uint32_t ip;                   // IP address
-    uint32_t netmask;              // Netmask
     uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
-    uint8_t dst_mac[MAC_LEN];      // Dest MAC (server on other side)
+    uint8_t dst_mac[MAC_LEN];      // Dest MAC (next-hop)
 };
 
 // Global config
