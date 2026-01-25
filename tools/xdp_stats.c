@@ -96,10 +96,8 @@ int main(int argc, char **argv)
             bpf_map_lookup_elem(stats_fd, &i, &stats[i]);
         }
 
-        printf("\r[Stats] total=%lu | non-IP=%lu | local=%lu | redirect=%lu | no-config=%lu | "
-               "delta: +%lu total, +%lu redirect",
-               stats[0], stats[1], stats[2], stats[3], stats[4],
-               stats[0] - prev[0], stats[3] - prev[3]);
+        printf("\r[Stats] total=%lu | non-IP=%lu | local=%lu | try_redir=%lu | success=%lu | no_sock=%lu",
+               stats[0], stats[1], stats[2], stats[3], stats[5], stats[6]);
         fflush(stdout);
 
         for (int i = 0; i < 8; i++)
@@ -118,6 +116,8 @@ int main(int argc, char **argv)
     printf("Local net (passed): %lu\n", stats[2]);
     printf("Redirect attempted: %lu\n", stats[3]);
     printf("Config missing:     %lu\n", stats[4]);
+    printf("Redirect success:   %lu\n", stats[5]);
+    printf("No socket (fail):   %lu\n", stats[6]);
 
     // Cleanup
     bpf_set_link_xdp_fd(ifindex, -1, XDP_FLAGS_SKB_MODE);

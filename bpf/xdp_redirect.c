@@ -17,6 +17,8 @@ struct {
 // 2: local network passed
 // 3: redirect attempted
 // 4: config missing
+// 5: redirect success
+// 6: redirect fail (no socket)
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -74,7 +76,17 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     }
 
     inc_stat(3); // redirect attempted
-    return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
+
+    // Check if socket exists for this queue
+    int qid = ctx->rx_queue_index;
+    int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
+    if (!sock) {
+        inc_stat(6); // no socket for this queue
+        return XDP_PASS;
+    }
+
+    inc_stat(5); // socket exists, redirect
+    return bpf_redirect_map(&xsks_map, qid, XDP_PASS);
 }
 
 char _license[] SEC("license") = "GPL";
