@@ -17,33 +17,39 @@ LB_TEST = lb_test
 XDP_RECV_TEST_SRC = tools/xdp_recv_test.c src/config.c src/interface.c
 XDP_RECV_TEST = xdp_recv_test
 
+XDP_DEBUG_SRC = tools/xdp_debug.c src/config.c
+XDP_DEBUG = xdp_debug
+
 BPF_SRC = bpf/xdp_redirect.c
 BPF_OBJ = bpf/xdp_redirect.o
 
 .PHONY: all clean run test
 
-all: $(BPF_OBJ) $(TARGET) $(LB_TEST) $(XDP_RECV_TEST)
+all: $(BPF_OBJ) $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG)
 
 $(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
+        $(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
 
 $(LB_TEST): $(LB_TEST_SRC)
-	$(CC) $(CFLAGS) $(LB_TEST_SRC) -o $(LB_TEST) $(LDFLAGS)
+        $(CC) $(CFLAGS) $(LB_TEST_SRC) -o $(LB_TEST) $(LDFLAGS)
 
 $(XDP_RECV_TEST): $(XDP_RECV_TEST_SRC)
-	$(CC) $(CFLAGS) $(XDP_RECV_TEST_SRC) -o $(XDP_RECV_TEST) $(LDFLAGS)
+        $(CC) $(CFLAGS) $(XDP_RECV_TEST_SRC) -o $(XDP_RECV_TEST) $(LDFLAGS)
+
+$(XDP_DEBUG): $(XDP_DEBUG_SRC)
+        $(CC) $(CFLAGS) $(XDP_DEBUG_SRC) -o $(XDP_DEBUG) $(LDFLAGS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+        $(CC) $(CFLAGS) -c $< -o $@
 
 $(BPF_OBJ): $(BPF_SRC)
-	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
+        $(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 clean:
-	rm -f src/*.o tools/*.o *.o $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(BPF_OBJ)
+        rm -f src/*.o tools/*.o *.o $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG) $(BPF_OBJ)
 
 run: all
-	sudo ./$(TARGET) config.cfg
+        sudo ./$(TARGET) config.cfg
 
 test: $(LB_TEST)
-	sudo ./$(LB_TEST) config.txt
+        sudo ./$(LB_TEST) config.txt
