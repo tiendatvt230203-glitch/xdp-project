@@ -4,14 +4,28 @@
 #include "common.h"
 #include "config.h"
 
-// Interface state - each interface has its own complete ring set
-struct xsk_interface {
-    // Socket and UMEM
+// Per-queue socket state
+struct xsk_queue {
     struct xsk_socket *xsk;
+    struct xsk_ring_prod fill;
+    struct xsk_ring_cons comp;
+    struct xsk_ring_prod tx;
+    struct xsk_ring_cons rx;
+};
+
+// Interface state - supports multiple queues
+struct xsk_interface {
+    // Shared UMEM across all queues
     struct xsk_umem *umem;
     void *bufs;
 
-    // All 4 rings
+    // Per-queue sockets (for multi-queue RX)
+    struct xsk_queue queues[MAX_QUEUES];
+    int queue_count;
+    int current_queue;              // Round-robin for recv
+
+    // Single socket pointer for WAN (TX only, queue 0)
+    struct xsk_socket *xsk;
     struct xsk_ring_prod fill;
     struct xsk_ring_cons comp;
     struct xsk_ring_prod tx;

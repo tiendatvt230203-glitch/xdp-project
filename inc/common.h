@@ -26,6 +26,9 @@
 #define BATCH_SIZE      512                     // Large batch
 #define RING_SIZE       16384                   // 16K ring entries
 
+// Multi-queue support
+#define MAX_QUEUES      64                      // Max RX queues per interface
+
 // XDP flags
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1U << 1)
