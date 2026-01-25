@@ -6,6 +6,7 @@
 
 static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
+static int config_map_fd = -1;
 
 int interface_init_local(struct xsk_interface *iface,
                          const struct local_config *local_cfg,
@@ -77,6 +78,14 @@ int interface_init_local(struct xsk_interface *iface,
             goto err;
         }
         xsk_map_fd = bpf_map__fd(map);
+
+        map = bpf_object__find_map_by_name(bpf_obj, "config_map");
+        if (map) {
+            config_map_fd = bpf_map__fd(map);
+            int key0 = 0, key1 = 1;
+            bpf_map_update_elem(config_map_fd, &key0, &local_cfg->network, 0);
+            bpf_map_update_elem(config_map_fd, &key1, &local_cfg->netmask, 0);
+        }
 
         ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
         if (ret) {
