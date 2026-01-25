@@ -25,6 +25,9 @@ struct xsk_interface {
     uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
     uint8_t dst_mac[MAC_LEN];      // Destination MAC (remote interface)
 
+    // TX slot tracking
+    uint64_t tx_slot;
+
     // Stats
     uint64_t rx_packets;
     uint64_t tx_packets;

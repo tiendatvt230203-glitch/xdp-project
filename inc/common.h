@@ -19,13 +19,14 @@
 #include <xdp/xsk.h>
 #include <errno.h>
 
-// Frame and buffer sizes
-#define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
-#define FRAME_COUNT 4096
-#define UMEM_SIZE (FRAME_COUNT * FRAME_SIZE)
-#define BATCH_SIZE 64
+// High-performance settings for 2.5Gbps+
+#define FRAME_SIZE      2048                    // Smaller frame for better cache
+#define FRAME_COUNT     (32 * 1024)             // 32K frames = 64MB UMEM
+#define UMEM_SIZE       (FRAME_COUNT * FRAME_SIZE)
+#define BATCH_SIZE      256                     // Large batch for throughput
+#define RING_SIZE       8192                    // Large rings
 
-// XDP flags compatibility
+// XDP flags
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1U << 1)
 #endif

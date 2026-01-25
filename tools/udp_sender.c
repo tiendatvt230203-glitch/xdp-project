@@ -1,3 +1,11 @@
+/*
+ * High-Performance UDP Sender - Client1
+ * Sends UDP traffic at maximum rate (2.5Gbps target)
+ *
+ * Usage: ./udp_sender <dst_ip> <seconds>
+ * Example: ./udp_sender 192.168.182.2 10
+ */
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,9 +18,8 @@
 #include <signal.h>
 
 #define PKT_SIZE    1400
-#define BATCH_SIZE  1       // Single packet per send for debugging
+#define BATCH_SIZE  64
 #define DST_PORT    5001
-#define RATE_LIMIT  10000   // packets per second (~100Mbps)
 
 static volatile int running = 1;
 
@@ -69,18 +76,18 @@ int main(int argc, char *argv[])
     }
 
     printf("========================================\n");
-    printf("      UDP SENDER - CLIENT1 (DEBUG)\n");
+    printf("   HIGH-PERF UDP SENDER - CLIENT1\n");
     printf("========================================\n");
     printf("Dst IP:    %s\n", dst_ip_str);
     printf("Dst Port:  %d\n", DST_PORT);
     printf("Pkt Size:  %d bytes\n", PKT_SIZE);
-    printf("Rate:      %d pps (~%d Mbps)\n", RATE_LIMIT, RATE_LIMIT * PKT_SIZE * 8 / 1000000);
+    printf("Batch:     %d packets\n", BATCH_SIZE);
     printf("Duration:  %d sec\n", duration);
     printf("========================================\n\n");
 
     signal(SIGINT, sigint_handler);
 
-    printf("Sending at ~%d Mbps for %d seconds...\n", RATE_LIMIT * PKT_SIZE * 8 / 1000000, duration);
+    printf("Sending at MAX RATE for %d seconds...\n", duration);
     printf("Press Ctrl+C to stop\n\n");
 
     struct timespec start, now;
@@ -96,22 +103,19 @@ int main(int argc, char *argv[])
         if (elapsed >= duration)
             break;
 
-        // Send single packet
+        // Batch send
         int sent = sendmmsg(sock, msgs, BATCH_SIZE, 0);
         if (sent > 0) {
             total_sent += sent;
             total_bytes += sent * PKT_SIZE;
         }
 
-        // Rate limit: sleep to achieve target rate
-        usleep(1000000 / RATE_LIMIT);
-
-        // Print every 1000 packets
+        // Print every 100K loops
         loops++;
-        if (loops % 1000 == 0) {
-            double rate_mbps = (total_bytes * 8.0) / elapsed / 1e6;
-            printf("\rSent: %lu pkts | %.2f Mbps | %.2f Kpps",
-                   total_sent, rate_mbps, total_sent / elapsed / 1000);
+        if (loops % 100000 == 0) {
+            double rate_gbps = (total_bytes * 8.0) / elapsed / 1e9;
+            printf("\rSent: %lu pkts | %.2f Gbps | %.2f Mpps",
+                   total_sent, rate_gbps, total_sent / elapsed / 1e6);
             fflush(stdout);
         }
     }
@@ -125,8 +129,8 @@ int main(int argc, char *argv[])
     printf("Total Packets: %lu\n", total_sent);
     printf("Total Bytes:   %lu\n", total_bytes);
     printf("Time:          %.2f sec\n", elapsed);
-    printf("Rate:          %.2f Kpps\n", total_sent / elapsed / 1000);
-    printf("Throughput:    %.2f Mbps\n", (total_bytes * 8.0) / elapsed / 1e6);
+    printf("Rate:          %.2f Mpps\n", total_sent / elapsed / 1e6);
+    printf("Throughput:    %.2f Gbps\n", (total_bytes * 8.0) / elapsed / 1e9);
     printf("========================================\n");
 
     close(sock);
