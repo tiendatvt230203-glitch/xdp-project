@@ -94,13 +94,9 @@ int main(int argc, char *argv[])
     }
     int ifindex = ifr.ifr_ifindex;
 
-    if (ioctl(sock, SIOCGIFHWADDR, &ifr) < 0) {
-        perror("ioctl SIOCGIFHWADDR");
-        close(sock);
-        return 1;
-    }
-    uint8_t src_mac[6];
-    memcpy(src_mac, ifr.ifr_hwaddr.sa_data, 6);
+    // HARDCODE MAC addresses
+    // Client01 enp7s0 MAC (source - sender)
+    uint8_t src_mac[6] = {0x20, 0x7c, 0x14, 0xf8, 0x0d, 0x08};
 
     if (ioctl(sock, SIOCGIFADDR, &ifr) < 0) {
         perror("ioctl SIOCGIFADDR");
@@ -112,7 +108,7 @@ int main(int argc, char *argv[])
     uint32_t dst_ip;
     inet_pton(AF_INET, dst_ip_str, &dst_ip);
 
-    // Gateway MAC (Server01 enp7s0)
+    // Server01 enp7s0 MAC (destination - gateway)
     uint8_t dst_mac[6] = {0x20, 0x7c, 0x14, 0xf8, 0x0c, 0xd2};
 
     // Bind to interface
