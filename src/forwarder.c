@@ -166,7 +166,9 @@ static void *wan_rx_thread(void *arg)
                 struct xsk_interface *local = &fwd->locals[local_idx];
                 struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
 
-                if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i]) == 0) {
+                // Each WAN thread uses its own TX queue on LOCAL (wan_idx)
+                // This eliminates mutex contention - each thread has dedicated queue!
+                if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i], wan_idx) == 0) {
                     __sync_fetch_and_add(&fwd->wan_to_local, 1);
                     local_used[local_idx] = 1;
                 } else {
@@ -174,10 +176,10 @@ static void *wan_rx_thread(void *arg)
                 }
             }
 
-            // Flush all LOCALs that were used
+            // Flush the queue this WAN thread uses
             for (int l = 0; l < fwd->local_count; l++) {
                 if (local_used[l])
-                    interface_send_to_local_flush(&fwd->locals[l]);
+                    interface_send_to_local_flush(&fwd->locals[l], wan_idx);
             }
 
             interface_recv_release(wan, addrs, rcvd);

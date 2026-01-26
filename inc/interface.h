@@ -14,6 +14,10 @@ struct xsk_queue {
     struct xsk_ring_cons comp;
     struct xsk_ring_prod tx;
     struct xsk_ring_cons rx;
+
+    // Per-queue TX state (for parallel TX without mutex)
+    uint64_t tx_slot;
+    int pending_tx_count;
 };
 
 // Interface state - supports multiple queues
@@ -99,13 +103,14 @@ int interface_send_batch(struct xsk_interface *iface,
 // Flush all pending TX packets (kick once)
 void interface_send_flush(struct xsk_interface *iface);
 
-// Add packet to LOCAL TX batch
+// Add packet to LOCAL TX batch (uses specific queue for parallel TX)
 int interface_send_to_local_batch(struct xsk_interface *iface,
                                   const struct local_config *local_cfg,
-                                  void *pkt_data, uint32_t pkt_len);
+                                  void *pkt_data, uint32_t pkt_len,
+                                  int tx_queue);
 
-// Flush LOCAL TX
-void interface_send_to_local_flush(struct xsk_interface *iface);
+// Flush LOCAL TX (specific queue)
+void interface_send_to_local_flush(struct xsk_interface *iface, int tx_queue);
 
 // Print interface stats
 void interface_print_stats(struct xsk_interface *iface);

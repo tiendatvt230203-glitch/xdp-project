@@ -192,6 +192,10 @@ int interface_init_local(struct xsk_interface *iface,
             *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
         xsk_ring_prod__submit(&queue->fill, ret);
 
+        // Initialize per-queue TX state
+        queue->tx_slot = 0;
+        queue->pending_tx_count = 0;
+
         printf("[LOCAL] Queue %d: fd=%d, umem=%p, fill=%d frames\n", q, fd, queue->bufs, ret);
         iface->queue_count++;
     }
@@ -429,6 +433,10 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         for (int i = 0; i < ret; i++)
             *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
         xsk_ring_prod__submit(&queue->fill, ret);
+
+        // Initialize per-queue TX state
+        queue->tx_slot = 0;
+        queue->pending_tx_count = 0;
 
         printf("[WAN-RX] Queue %d: fd=%d, fill=%d frames\n", q, fd, ret);
         iface->queue_count++;
@@ -832,21 +840,21 @@ void interface_send_flush(struct xsk_interface *iface)
 }
 
 // Add packet to LOCAL TX batch
-// Thread-safe: uses mutex
+// Each caller should use a different tx_queue for parallel TX (NO MUTEX needed!)
 int interface_send_to_local_batch(struct xsk_interface *iface,
                                   const struct local_config *local_cfg,
-                                  void *pkt_data, uint32_t pkt_len)
+                                  void *pkt_data, uint32_t pkt_len,
+                                  int tx_queue)
 {
     uint32_t idx;
     struct ether_header *eth;
-    int ret = 0;
 
     if (iface->queue_count == 0)
         return -1;
 
-    pthread_mutex_lock(&iface->tx_lock);
-
-    struct xsk_queue *queue = &iface->queues[0];
+    // Use specified queue (mod queue_count for safety)
+    int q = tx_queue % iface->queue_count;
+    struct xsk_queue *queue = &iface->queues[q];
 
     // ALWAYS drain completion ring to free up TX slots
     uint32_t comp_idx;
@@ -857,9 +865,9 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
     if (reserved < 1) {
         // Flush pending and retry aggressively
-        if (iface->pending_tx_count > 0) {
+        if (queue->pending_tx_count > 0) {
             sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-            iface->pending_tx_count = 0;
+            queue->pending_tx_count = 0;
         }
 
         // Drain completion ring again
@@ -880,14 +888,14 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
         }
 
         if (reserved < 1) {
-            ret = -1;
-            goto unlock;
+            return -1;
         }
     }
 
-    // Use rotating TX buffer slots (second half)
-    uint64_t addr = ((iface->tx_slot % (FRAME_COUNT / 2)) + FRAME_COUNT / 2) * FRAME_SIZE;
-    iface->tx_slot++;
+    // Use rotating TX buffer slots (second half of this queue's UMEM)
+    // Each queue has its own tx_slot counter - no contention!
+    uint64_t addr = ((queue->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
+    queue->tx_slot++;
 
     void *tx_buf = (uint8_t *)queue->bufs + addr;
     memcpy(tx_buf, pkt_data, pkt_len);
@@ -901,32 +909,30 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
     xsk_ring_prod__submit(&queue->tx, 1);
 
-    iface->pending_tx_count++;
+    queue->pending_tx_count++;
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
     // Auto-flush more frequently (every 64 packets) for lower latency
-    if (iface->pending_tx_count >= 64) {
+    if (queue->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        iface->pending_tx_count = 0;
+        queue->pending_tx_count = 0;
     }
 
-unlock:
-    pthread_mutex_unlock(&iface->tx_lock);
-    return ret;
+    return 0;
 }
 
-// Flush LOCAL TX
-// Thread-safe: uses mutex
-void interface_send_to_local_flush(struct xsk_interface *iface)
+// Flush LOCAL TX (specific queue - no mutex needed)
+void interface_send_to_local_flush(struct xsk_interface *iface, int tx_queue)
 {
     if (iface->queue_count == 0)
         return;
 
-    pthread_mutex_lock(&iface->tx_lock);
-    if (iface->pending_tx_count > 0) {
-        sendto(xsk_socket__fd(iface->queues[0].xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        iface->pending_tx_count = 0;
+    int q = tx_queue % iface->queue_count;
+    struct xsk_queue *queue = &iface->queues[q];
+
+    if (queue->pending_tx_count > 0) {
+        sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        queue->pending_tx_count = 0;
     }
-    pthread_mutex_unlock(&iface->tx_lock);
 }
