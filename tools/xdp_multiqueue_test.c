@@ -1,25 +1,26 @@
 // Multi-queue test - each queue has its own UMEM (separate from main code)
-#include <linux/if_xdp.h>
-#include <linux/if_link.h>
-#include <linux/ethtool.h>
-#include <linux/sockios.h>
-#include <linux/if.h>
-#include <net/if.h>
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
-#include <xdp/xsk.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <net/ethernet.h>
-#include <linux/ip.h>
-#include <arpa/inet.h>
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
+#include <poll.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <net/ethernet.h>
+#include <linux/if_xdp.h>
+#include <linux/if_link.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
+#include <linux/ip.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include <xdp/xsk.h>
 
 #define FRAME_SIZE 4096
 #define FRAME_COUNT 4096
