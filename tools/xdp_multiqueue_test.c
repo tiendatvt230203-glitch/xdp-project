@@ -89,8 +89,17 @@ static int init_queue(struct queue_state *q, const char *ifname, int queue_id, i
     }
     mlock(q->bufs, UMEM_SIZE);
 
+    // UMEM config with explicit ring sizes
+    struct xsk_umem_config umem_cfg = {
+        .fill_size = RING_SIZE,
+        .comp_size = RING_SIZE,
+        .frame_size = FRAME_SIZE,
+        .frame_headroom = 0,
+        .flags = 0
+    };
+
     // Create UMEM for this queue
-    ret = xsk_umem__create(&q->umem, q->bufs, UMEM_SIZE, &q->fill, &q->comp, NULL);
+    ret = xsk_umem__create(&q->umem, q->bufs, UMEM_SIZE, &q->fill, &q->comp, &umem_cfg);
     if (ret) {
         fprintf(stderr, "Queue %d: xsk_umem__create failed: %d\n", queue_id, ret);
         free(q->bufs);
@@ -126,6 +135,9 @@ static int init_queue(struct queue_state *q, const char *ifname, int queue_id, i
 
     // Fill the fill queue
     ret = xsk_ring_prod__reserve(&q->fill, RING_SIZE, &idx);
+    if (ret != RING_SIZE) {
+        fprintf(stderr, "Queue %d: fill reserve got %d, expected %d\n", queue_id, ret, RING_SIZE);
+    }
     for (int i = 0; i < ret; i++)
         *xsk_ring_prod__fill_addr(&q->fill, idx++) = i * FRAME_SIZE;
     xsk_ring_prod__submit(&q->fill, ret);
