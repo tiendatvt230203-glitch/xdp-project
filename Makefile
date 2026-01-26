@@ -23,12 +23,18 @@ XDP_DEBUG = xdp_debug
 XDP_STATS_SRC = tools/xdp_stats.c
 XDP_STATS = xdp_stats
 
+XDP_FULL_TEST_SRC = tools/xdp_full_test.c
+XDP_FULL_TEST = xdp_full_test
+
+XDP_MQ_TEST_SRC = tools/xdp_multiqueue_test.c
+XDP_MQ_TEST = xdp_mq_test
+
 BPF_SRC = bpf/xdp_redirect.c
 BPF_OBJ = bpf/xdp_redirect.o
 
 .PHONY: all clean run test
 
-all: $(BPF_OBJ) $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG) $(XDP_STATS)
+all: $(BPF_OBJ) $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG) $(XDP_STATS) $(XDP_FULL_TEST) $(XDP_MQ_TEST)
 
 $(TARGET): $(OBJ)
 	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
@@ -45,6 +51,12 @@ $(XDP_DEBUG): $(XDP_DEBUG_SRC)
 $(XDP_STATS): $(XDP_STATS_SRC)
 	$(CC) $(CFLAGS) $(XDP_STATS_SRC) -o $(XDP_STATS) $(LDFLAGS)
 
+$(XDP_FULL_TEST): $(XDP_FULL_TEST_SRC)
+	$(CC) $(CFLAGS) $(XDP_FULL_TEST_SRC) -o $(XDP_FULL_TEST) $(LDFLAGS)
+
+$(XDP_MQ_TEST): $(XDP_MQ_TEST_SRC)
+	$(CC) $(CFLAGS) $(XDP_MQ_TEST_SRC) -o $(XDP_MQ_TEST) $(LDFLAGS)
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -52,7 +64,7 @@ $(BPF_OBJ): $(BPF_SRC)
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 clean:
-	rm -f src/*.o tools/*.o *.o $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG) $(XDP_STATS) $(BPF_OBJ)
+	rm -f src/*.o tools/*.o *.o $(TARGET) $(LB_TEST) $(XDP_RECV_TEST) $(XDP_DEBUG) $(XDP_STATS) $(XDP_FULL_TEST) $(XDP_MQ_TEST) $(BPF_OBJ)
 
 run: all
 	sudo ./$(TARGET) config.cfg

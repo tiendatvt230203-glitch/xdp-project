@@ -3,9 +3,10 @@
 #include <net/ethernet.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
-#include <sys/ioctl.h>
+#include <linux/if.h>
 
 static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
