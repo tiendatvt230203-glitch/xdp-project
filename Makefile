@@ -1,7 +1,7 @@
 CC = gcc
 CLANG = clang
 CFLAGS = -Iinc -Wall -O2
-LDFLAGS = -lbpf -lxdp
+LDFLAGS = -lbpf -lxdp -lpthread
 
 BPF_CFLAGS = -O2 -target bpf -g
 KERNEL_HEADERS = /usr/include
