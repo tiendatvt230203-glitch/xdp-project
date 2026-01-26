@@ -50,7 +50,6 @@ int interface_init_local(struct xsk_interface *iface,
     struct bpf_program *prog;
     struct bpf_map *map;
     int prog_fd;
-    uint32_t idx;
 
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(local_cfg->ifname);
@@ -67,54 +66,46 @@ int interface_init_local(struct xsk_interface *iface,
     int queue_count = get_rx_queue_count(local_cfg->ifname);
     printf("[LOCAL] %s has %d RX queues\n", local_cfg->ifname, queue_count);
 
-    ret = posix_memalign(&iface->bufs, getpagesize(), UMEM_SIZE);
-    if (ret || !iface->bufs) {
-        perror("posix_memalign");
-        return -1;
-    }
-
-    mlock(iface->bufs, UMEM_SIZE);
-
-    // Create shared UMEM - use first queue's fill/comp rings
-    ret = xsk_umem__create(&iface->umem, iface->bufs, UMEM_SIZE,
-                           &iface->queues[0].fill, &iface->queues[0].comp, NULL);
-    if (ret) {
-        perror("xsk_umem__create");
-        free(iface->bufs);
-        return -1;
-    }
-
-    // Load XDP program (only once)
+    // Load XDP program FIRST (before creating sockets)
     if (!bpf_obj) {
+        // Detach any existing XDP
+        bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+
         if (access(bpf_file, F_OK) != 0) {
             fprintf(stderr, "XDP object not found: %s\n", bpf_file);
-            goto err;
+            return -1;
         }
 
         bpf_obj = bpf_object__open_file(bpf_file, NULL);
         if (libbpf_get_error(bpf_obj)) {
             fprintf(stderr, "Failed to open %s\n", bpf_file);
             bpf_obj = NULL;
-            goto err;
+            return -1;
         }
 
         ret = bpf_object__load(bpf_obj);
         if (ret) {
             fprintf(stderr, "Failed to load BPF object\n");
-            goto err;
+            bpf_object__close(bpf_obj);
+            bpf_obj = NULL;
+            return -1;
         }
 
         prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
         if (!prog) {
             fprintf(stderr, "XDP program not found\n");
-            goto err;
+            bpf_object__close(bpf_obj);
+            bpf_obj = NULL;
+            return -1;
         }
         prog_fd = bpf_program__fd(prog);
 
         map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
         if (!map) {
             fprintf(stderr, "xsks_map not found\n");
-            goto err;
+            bpf_object__close(bpf_obj);
+            bpf_obj = NULL;
+            return -1;
         }
         xsk_map_fd = bpf_map__fd(map);
 
@@ -125,13 +116,16 @@ int interface_init_local(struct xsk_interface *iface,
             bpf_map_update_elem(config_map_fd, &key0, &local_cfg->network, 0);
             bpf_map_update_elem(config_map_fd, &key1, &local_cfg->netmask, 0);
         }
-
-        ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
-        if (ret) {
-            fprintf(stderr, "bpf_set_link_xdp_fd failed: %d\n", ret);
-            goto err;
-        }
     }
+
+    // UMEM config with explicit ring sizes (critical for multi-queue!)
+    struct xsk_umem_config umem_cfg = {
+        .fill_size = RING_SIZE,
+        .comp_size = RING_SIZE,
+        .frame_size = FRAME_SIZE,
+        .frame_headroom = 0,
+        .flags = 0
+    };
 
     struct xsk_socket_config sock_cfg = {
         .rx_size = RING_SIZE,
@@ -140,61 +134,96 @@ int interface_init_local(struct xsk_interface *iface,
         .bind_flags = XDP_COPY
     };
 
-    // Create socket for each queue
+    // Create separate UMEM and socket for each queue
     for (int q = 0; q < queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
+        uint32_t idx;
 
-        if (q == 0) {
-            // First queue uses UMEM directly
-            ret = xsk_socket__create(&queue->xsk, iface->ifname, q, iface->umem,
-                                     &queue->rx, &queue->tx, &sock_cfg);
-        } else {
-            // Other queues share UMEM
-            ret = xsk_socket__create_shared(&queue->xsk, iface->ifname, q, iface->umem,
-                                            &queue->rx, &queue->tx,
-                                            &queue->fill, &queue->comp, &sock_cfg);
+        // Allocate separate buffer for this queue
+        ret = posix_memalign(&queue->bufs, getpagesize(), UMEM_SIZE);
+        if (ret || !queue->bufs) {
+            fprintf(stderr, "Queue %d: posix_memalign failed\n", q);
+            goto err_queues;
+        }
+        mlock(queue->bufs, UMEM_SIZE);
+
+        // Create separate UMEM for this queue
+        ret = xsk_umem__create(&queue->umem, queue->bufs, UMEM_SIZE,
+                               &queue->fill, &queue->comp, &umem_cfg);
+        if (ret) {
+            fprintf(stderr, "Queue %d: xsk_umem__create failed: %d\n", q, ret);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
         }
 
+        // Create socket for this queue
+        ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
+                                 &queue->rx, &queue->tx, &sock_cfg);
         if (ret) {
-            fprintf(stderr, "xsk_socket__create queue %d failed: %d\n", q, ret);
-            for (int j = 0; j < q; j++)
-                xsk_socket__delete(iface->queues[j].xsk);
-            bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
-            goto err;
+            fprintf(stderr, "Queue %d: xsk_socket__create failed: %d\n", q, ret);
+            xsk_umem__delete(queue->umem);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
         }
 
         // Register socket in xsks_map
         int fd = xsk_socket__fd(queue->xsk);
         ret = bpf_map_update_elem(xsk_map_fd, &q, &fd, 0);
         if (ret) {
-            fprintf(stderr, "bpf_map_update_elem queue %d failed\n", q);
-            for (int j = 0; j <= q; j++)
-                xsk_socket__delete(iface->queues[j].xsk);
-            bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
-            goto err;
+            fprintf(stderr, "Queue %d: bpf_map_update_elem failed\n", q);
+            xsk_socket__delete(queue->xsk);
+            xsk_umem__delete(queue->umem);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
         }
 
-        printf("[LOCAL] Queue %d registered in xsks_map\n", q);
+        // Fill the fill queue for this queue
+        ret = xsk_ring_prod__reserve(&queue->fill, RING_SIZE, &idx);
+        if (ret != RING_SIZE) {
+            fprintf(stderr, "Queue %d: fill reserve got %d, expected %d\n", q, ret, RING_SIZE);
+        }
+        for (int i = 0; i < ret; i++)
+            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
+        xsk_ring_prod__submit(&queue->fill, ret);
+
+        printf("[LOCAL] Queue %d: fd=%d, umem=%p, fill=%d frames\n", q, fd, queue->bufs, ret);
         iface->queue_count++;
     }
 
-    // Fill the fill queue (queue 0 owns it)
-    uint32_t frames_per_queue = RING_SIZE;
-    ret = xsk_ring_prod__reserve(&iface->queues[0].fill, frames_per_queue, &idx);
-    for (uint32_t i = 0; i < frames_per_queue; i++)
-        *xsk_ring_prod__fill_addr(&iface->queues[0].fill, idx++) = i * FRAME_SIZE;
-    xsk_ring_prod__submit(&iface->queues[0].fill, frames_per_queue);
+    // Attach XDP AFTER all sockets are created and registered
+    prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
+    prog_fd = bpf_program__fd(prog);
+    ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
+    if (ret) {
+        fprintf(stderr, "bpf_set_link_xdp_fd failed: %d\n", ret);
+        goto err_queues;
+    }
 
-    printf("[LOCAL] %s ready with %d queues\n", iface->ifname, iface->queue_count);
+    printf("[LOCAL] %s ready with %d queues, XDP attached\n", iface->ifname, iface->queue_count);
     return 0;
 
-err:
+err_queues:
+    // Cleanup already created queues
+    for (int j = 0; j < iface->queue_count; j++) {
+        struct xsk_queue *queue = &iface->queues[j];
+        if (queue->xsk) xsk_socket__delete(queue->xsk);
+        if (queue->umem) xsk_umem__delete(queue->umem);
+        if (queue->bufs) {
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+        }
+    }
+    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
     if (bpf_obj) {
         bpf_object__close(bpf_obj);
         bpf_obj = NULL;
     }
-    if (iface->umem) xsk_umem__delete(iface->umem);
-    if (iface->bufs) free(iface->bufs);
     return -1;
 }
 
@@ -261,10 +290,17 @@ int interface_init_wan(struct xsk_interface *iface,
 
 void interface_cleanup(struct xsk_interface *iface)
 {
-    // Clean up multi-queue sockets (LOCAL)
+    // Clean up multi-queue sockets (LOCAL) - each queue has its own UMEM
     for (int q = 0; q < iface->queue_count; q++) {
-        if (iface->queues[q].xsk)
-            xsk_socket__delete(iface->queues[q].xsk);
+        struct xsk_queue *queue = &iface->queues[q];
+        if (queue->xsk)
+            xsk_socket__delete(queue->xsk);
+        if (queue->umem)
+            xsk_umem__delete(queue->umem);
+        if (queue->bufs) {
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+        }
     }
 
     // Clean up single socket (WAN)
@@ -284,6 +320,11 @@ void interface_cleanup(struct xsk_interface *iface)
 
     memset(iface, 0, sizeof(*iface));
 }
+
+// Extended address encoding: [queue_id:8][addr:56]
+#define ADDR_ENCODE(q, addr) (((uint64_t)(q) << 56) | ((addr) & 0x00FFFFFFFFFFFFFF))
+#define ADDR_QUEUE(encoded)  ((int)((encoded) >> 56))
+#define ADDR_OFFSET(encoded) ((encoded) & 0x00FFFFFFFFFFFFFF)
 
 int interface_recv(struct xsk_interface *iface,
                    void **pkt_ptrs, uint32_t *pkt_lens,
@@ -307,8 +348,10 @@ int interface_recv(struct xsk_interface *iface,
 
         for (int j = 0; j < rcvd; j++) {
             const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
-            addrs[total_rcvd + j] = desc->addr;
-            pkt_ptrs[total_rcvd + j] = (uint8_t *)iface->bufs + desc->addr;
+            // Encode queue ID in high bits of address
+            addrs[total_rcvd + j] = ADDR_ENCODE(q, desc->addr);
+            // Use this queue's buffer
+            pkt_ptrs[total_rcvd + j] = (uint8_t *)queue->bufs + desc->addr;
             pkt_lens[total_rcvd + j] = desc->len;
         }
 
@@ -341,8 +384,10 @@ int interface_recv(struct xsk_interface *iface,
 
             for (int j = 0; j < rcvd; j++) {
                 const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
-                addrs[total_rcvd + j] = desc->addr;
-                pkt_ptrs[total_rcvd + j] = (uint8_t *)iface->bufs + desc->addr;
+                // Encode queue ID in high bits of address
+                addrs[total_rcvd + j] = ADDR_ENCODE(q, desc->addr);
+                // Use this queue's buffer
+                pkt_ptrs[total_rcvd + j] = (uint8_t *)queue->bufs + desc->addr;
                 pkt_lens[total_rcvd + j] = desc->len;
             }
 
@@ -358,32 +403,37 @@ int interface_recv(struct xsk_interface *iface,
 void interface_recv_release(struct xsk_interface *iface,
                             uint64_t *addrs, int count)
 {
-    uint32_t idx_fill = 0;
-
     // Guard against WAN interface (no queues)
     if (iface->queue_count == 0)
         return;
 
-    // Use queue 0's fill ring (shared UMEM owner)
-    struct xsk_ring_prod *fill = &iface->queues[0].fill;
-    struct xsk_ring_cons *comp = &iface->queues[0].comp;
+    // Group addresses by queue and return to each queue's fill ring
+    for (int i = 0; i < count; i++) {
+        int q = ADDR_QUEUE(addrs[i]);
+        uint64_t addr = ADDR_OFFSET(addrs[i]);
 
-    int ret = xsk_ring_prod__reserve(fill, count, &idx_fill);
-    if (ret != count) {
-        // Try releasing some completions first
-        uint32_t comp_idx;
-        xsk_ring_cons__peek(comp, BATCH_SIZE, &comp_idx);
-        xsk_ring_cons__release(comp, BATCH_SIZE);
+        if (q >= iface->queue_count)
+            continue;
 
-        ret = xsk_ring_prod__reserve(fill, count, &idx_fill);
-        if (ret != count)
-            return;
+        struct xsk_queue *queue = &iface->queues[q];
+        uint32_t idx_fill;
+
+        int ret = xsk_ring_prod__reserve(&queue->fill, 1, &idx_fill);
+        if (ret != 1) {
+            // Try releasing some completions first
+            uint32_t comp_idx;
+            int comp = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+            if (comp > 0)
+                xsk_ring_cons__release(&queue->comp, comp);
+
+            ret = xsk_ring_prod__reserve(&queue->fill, 1, &idx_fill);
+            if (ret != 1)
+                continue;
+        }
+
+        *xsk_ring_prod__fill_addr(&queue->fill, idx_fill) = addr;
+        xsk_ring_prod__submit(&queue->fill, 1);
     }
-
-    for (int i = 0; i < count; i++)
-        *xsk_ring_prod__fill_addr(fill, idx_fill + i) = addrs[i];
-
-    xsk_ring_prod__submit(fill, count);
 }
 
 int interface_send(struct xsk_interface *iface,

@@ -4,9 +4,11 @@
 #include "common.h"
 #include "config.h"
 
-// Per-queue socket state
+// Per-queue socket state - each queue has its own UMEM
 struct xsk_queue {
     struct xsk_socket *xsk;
+    struct xsk_umem *umem;       // Separate UMEM per queue
+    void *bufs;                   // Separate buffer per queue
     struct xsk_ring_prod fill;
     struct xsk_ring_cons comp;
     struct xsk_ring_prod tx;
