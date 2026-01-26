@@ -15,8 +15,8 @@ OBJ = $(SRC:.c=.o)
 TARGET = $(BIN_DIR)/xdp_forwarder
 
 # BPF
-BPF_SRC = bpf/xdp_redirect.c
-BPF_OBJ = bpf/xdp_redirect.o
+BPF_SRC = bpf/xdp_redirect.c bpf/xdp_wan_redirect.c
+BPF_OBJ = bpf/xdp_redirect.o bpf/xdp_wan_redirect.o
 
 # Test tools
 TOOLS = $(BIN_DIR)/lb_test \
@@ -57,7 +57,7 @@ $(BIN_DIR)/xdp_mq_test: tools/xdp_multiqueue_test.c
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BPF_OBJ): $(BPF_SRC)
+bpf/%.o: bpf/%.c
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 clean:

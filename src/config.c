@@ -184,6 +184,19 @@ int config_load(struct app_config *cfg, const char *filename)
     return 0;
 }
 
+// Find LOCAL interface for a given dest IP
+int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip)
+{
+    for (int i = 0; i < cfg->local_count; i++) {
+        struct local_config *local = &cfg->locals[i];
+        // Check if dest_ip belongs to this network
+        if ((dest_ip & local->netmask) == local->network) {
+            return i;
+        }
+    }
+    return -1;  // Not found
+}
+
 void config_print(struct app_config *cfg)
 {
     char ip_buf[INET_ADDRSTRLEN], ip_buf2[INET_ADDRSTRLEN];

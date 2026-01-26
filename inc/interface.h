@@ -56,9 +56,14 @@ int interface_init_local(struct xsk_interface *iface,
                          const struct local_config *local_cfg,
                          const char *bpf_file);
 
-// Initialize WAN interface (TX for forwarding)
+// Initialize WAN interface (TX only for forwarding)
 int interface_init_wan(struct xsk_interface *iface,
                        const struct wan_config *wan_cfg);
+
+// Initialize WAN interface with RX (for receiving return traffic)
+int interface_init_wan_rx(struct xsk_interface *iface,
+                          const struct wan_config *wan_cfg,
+                          const char *bpf_file);
 
 // Cleanup interface
 void interface_cleanup(struct xsk_interface *iface);
@@ -75,6 +80,11 @@ void interface_recv_release(struct xsk_interface *iface,
 // Send packet through WAN interface (rewrites MAC)
 int interface_send(struct xsk_interface *iface,
                    void *pkt_data, uint32_t pkt_len);
+
+// Send packet to LOCAL interface (rewrites MAC from local_config)
+int interface_send_to_local(struct xsk_interface *iface,
+                            const struct local_config *local_cfg,
+                            void *pkt_data, uint32_t pkt_len);
 
 // Print interface stats
 void interface_print_stats(struct xsk_interface *iface);

@@ -7,20 +7,24 @@
 #define LB_WINDOW_SIZE (64 * 1024)
 
 struct forwarder {
-    // LOCAL interfaces (receive packets from clients)
+    // LOCAL interfaces (RX from clients, TX back to clients)
     struct xsk_interface locals[MAX_INTERFACES];
     int local_count;
 
-    // WAN interfaces (send packets to other servers)
+    // WAN interfaces (RX + TX combined)
     struct xsk_interface wans[MAX_INTERFACES];
     int wan_count;
 
-    // Load balancer state
+    // Reference to config (for IP → LOCAL lookup)
+    struct app_config *cfg;
+
+    // Load balancer state (LOCAL → WAN)
     int current_wan;           // Current WAN index
     uint64_t window_bytes;     // Bytes sent in current window
 
     // Stats
-    uint64_t total_forwarded;
+    uint64_t local_to_wan;     // Packets forwarded LOCAL → WAN
+    uint64_t wan_to_local;     // Packets forwarded WAN → LOCAL
     uint64_t total_dropped;
 };
 

@@ -288,6 +288,181 @@ int interface_init_wan(struct xsk_interface *iface,
     return 0;
 }
 
+// WAN RX - separate BPF object per WAN interface
+int interface_init_wan_rx(struct xsk_interface *iface,
+                          const struct wan_config *wan_cfg,
+                          const char *bpf_file)
+{
+    int ret;
+    struct bpf_object *wan_bpf_obj = NULL;
+    struct bpf_program *prog;
+    struct bpf_map *map;
+    int prog_fd, wan_xsk_map_fd;
+
+    memset(iface, 0, sizeof(*iface));
+    iface->ifindex = if_nametoindex(wan_cfg->ifname);
+    strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
+    memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
+    memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
+
+    if (iface->ifindex == 0) {
+        fprintf(stderr, "WAN Interface %s not found\n", wan_cfg->ifname);
+        return -1;
+    }
+
+    // Get number of RX queues
+    int queue_count = get_rx_queue_count(wan_cfg->ifname);
+    printf("[WAN-RX] %s has %d RX queues\n", wan_cfg->ifname, queue_count);
+
+    // Detach any existing XDP
+    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+
+    // Load WAN XDP program
+    if (access(bpf_file, F_OK) != 0) {
+        fprintf(stderr, "WAN XDP object not found: %s\n", bpf_file);
+        return -1;
+    }
+
+    wan_bpf_obj = bpf_object__open_file(bpf_file, NULL);
+    if (libbpf_get_error(wan_bpf_obj)) {
+        fprintf(stderr, "Failed to open WAN BPF: %s\n", bpf_file);
+        return -1;
+    }
+
+    ret = bpf_object__load(wan_bpf_obj);
+    if (ret) {
+        fprintf(stderr, "Failed to load WAN BPF object\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+
+    prog = bpf_object__find_program_by_name(wan_bpf_obj, "xdp_wan_redirect_prog");
+    if (!prog) {
+        fprintf(stderr, "WAN XDP program not found\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+    prog_fd = bpf_program__fd(prog);
+
+    map = bpf_object__find_map_by_name(wan_bpf_obj, "wan_xsks_map");
+    if (!map) {
+        fprintf(stderr, "wan_xsks_map not found\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+    wan_xsk_map_fd = bpf_map__fd(map);
+
+    // UMEM config with explicit ring sizes
+    struct xsk_umem_config umem_cfg = {
+        .fill_size = RING_SIZE,
+        .comp_size = RING_SIZE,
+        .frame_size = FRAME_SIZE,
+        .frame_headroom = 0,
+        .flags = 0
+    };
+
+    struct xsk_socket_config sock_cfg = {
+        .rx_size = RING_SIZE,
+        .tx_size = RING_SIZE,
+        .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
+        .bind_flags = XDP_COPY
+    };
+
+    // Create separate UMEM and socket for each queue
+    for (int q = 0; q < queue_count; q++) {
+        struct xsk_queue *queue = &iface->queues[q];
+        uint32_t idx;
+
+        // Allocate separate buffer for this queue
+        ret = posix_memalign(&queue->bufs, getpagesize(), UMEM_SIZE);
+        if (ret || !queue->bufs) {
+            fprintf(stderr, "WAN Queue %d: posix_memalign failed\n", q);
+            goto err_queues;
+        }
+        mlock(queue->bufs, UMEM_SIZE);
+
+        // Create separate UMEM for this queue
+        ret = xsk_umem__create(&queue->umem, queue->bufs, UMEM_SIZE,
+                               &queue->fill, &queue->comp, &umem_cfg);
+        if (ret) {
+            fprintf(stderr, "WAN Queue %d: xsk_umem__create failed: %d\n", q, ret);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
+        }
+
+        // Create socket for this queue
+        ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
+                                 &queue->rx, &queue->tx, &sock_cfg);
+        if (ret) {
+            fprintf(stderr, "WAN Queue %d: xsk_socket__create failed: %d\n", q, ret);
+            xsk_umem__delete(queue->umem);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
+        }
+
+        // Register socket in wan_xsks_map
+        int fd = xsk_socket__fd(queue->xsk);
+        ret = bpf_map_update_elem(wan_xsk_map_fd, &q, &fd, 0);
+        if (ret) {
+            fprintf(stderr, "WAN Queue %d: bpf_map_update_elem failed\n", q);
+            xsk_socket__delete(queue->xsk);
+            xsk_umem__delete(queue->umem);
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+            queue->bufs = NULL;
+            goto err_queues;
+        }
+
+        // Fill the fill queue
+        ret = xsk_ring_prod__reserve(&queue->fill, RING_SIZE, &idx);
+        if (ret != RING_SIZE) {
+            fprintf(stderr, "WAN Queue %d: fill reserve got %d\n", q, ret);
+        }
+        for (int i = 0; i < ret; i++)
+            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
+        xsk_ring_prod__submit(&queue->fill, ret);
+
+        printf("[WAN-RX] Queue %d: fd=%d, fill=%d frames\n", q, fd, ret);
+        iface->queue_count++;
+    }
+
+    // Attach XDP after all sockets created
+    ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
+    if (ret) {
+        fprintf(stderr, "WAN bpf_set_link_xdp_fd failed: %d\n", ret);
+        goto err_queues;
+    }
+
+    // Set aliases for TX (interface_send uses these fields)
+    // Use queue 0 for TX
+    iface->xsk = iface->queues[0].xsk;
+    iface->tx = iface->queues[0].tx;
+    iface->comp = iface->queues[0].comp;
+    iface->bufs = iface->queues[0].bufs;
+    iface->tx_slot = 0;
+
+    printf("[WAN] %s ready with %d queues (RX+TX), XDP attached\n", iface->ifname, iface->queue_count);
+    return 0;
+
+err_queues:
+    for (int j = 0; j < iface->queue_count; j++) {
+        struct xsk_queue *queue = &iface->queues[j];
+        if (queue->xsk) xsk_socket__delete(queue->xsk);
+        if (queue->umem) xsk_umem__delete(queue->umem);
+        if (queue->bufs) {
+            munlock(queue->bufs, UMEM_SIZE);
+            free(queue->bufs);
+        }
+    }
+    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+    if (wan_bpf_obj) bpf_object__close(wan_bpf_obj);
+    return -1;
+}
+
 void interface_cleanup(struct xsk_interface *iface)
 {
     // Clean up multi-queue sockets (LOCAL) - each queue has its own UMEM
@@ -477,6 +652,63 @@ int interface_send(struct xsk_interface *iface,
     xsk_ring_prod__submit(&iface->tx, 1);
 
     sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+
+    iface->tx_packets++;
+    iface->tx_bytes += pkt_len;
+
+    return 0;
+}
+
+// Send packet to LOCAL interface (uses local_config for MAC rewrite)
+// LOCAL uses multi-queue, so we use queue 0 for TX
+int interface_send_to_local(struct xsk_interface *iface,
+                            const struct local_config *local_cfg,
+                            void *pkt_data, uint32_t pkt_len)
+{
+    uint32_t idx;
+    struct ether_header *eth;
+
+    // LOCAL uses multi-queue - use queue 0 for TX
+    if (iface->queue_count == 0)
+        return -1;
+
+    struct xsk_queue *queue = &iface->queues[0];
+
+    // Release completed TX buffers
+    uint32_t comp_idx;
+    int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+    if (completed > 0)
+        xsk_ring_cons__release(&queue->comp, completed);
+
+    int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+    if (reserved < 1) {
+        // Force kick and retry
+        sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&queue->comp, completed);
+        reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+        if (reserved < 1)
+            return -1;
+    }
+
+    // Use rotating TX buffer slots (use second half of buffer)
+    uint64_t addr = ((iface->tx_slot % (FRAME_COUNT / 2)) + FRAME_COUNT / 2) * FRAME_SIZE;
+    iface->tx_slot++;
+
+    void *tx_buf = (uint8_t *)queue->bufs + addr;
+    memcpy(tx_buf, pkt_data, pkt_len);
+
+    // Rewrite MAC using local_config
+    eth = (struct ether_header *)tx_buf;
+    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);  // Client's MAC
+    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);  // LOCAL interface MAC
+
+    xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
+    xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
+    xsk_ring_prod__submit(&queue->tx, 1);
+
+    sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
     iface->tx_packets++;
     iface->tx_bytes += pkt_len;

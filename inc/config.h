@@ -47,4 +47,8 @@ void config_print(struct app_config *cfg);
 // Parse MAC string "xx:xx:xx:xx:xx:xx" to bytes
 int parse_mac(const char *str, uint8_t *mac);
 
+// Find LOCAL interface for a given dest IP
+// Returns: index of LOCAL interface, or -1 if not found
+int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip);
+
 #endif
