@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "config.h"
+#include <pthread.h>
 
 // Per-queue socket state - each queue has its own UMEM
 struct xsk_queue {
@@ -41,10 +42,14 @@ struct xsk_interface {
     uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
     uint8_t dst_mac[MAC_LEN];      // Destination MAC (remote interface)
 
-    // TX slot tracking
+    // TX slot tracking (atomic for thread safety)
     uint64_t tx_slot;
 
-    // Stats
+    // TX mutex for thread-safe batch TX
+    pthread_mutex_t tx_lock;
+    int pending_tx_count;           // Pending packets in TX batch
+
+    // Stats (use atomic operations)
     uint64_t rx_packets;
     uint64_t tx_packets;
     uint64_t rx_bytes;

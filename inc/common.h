@@ -26,6 +26,17 @@
 #define BATCH_SIZE      512                     // Large batch
 #define RING_SIZE       16384                   // 16K ring entries
 
+/*
+ * UMEM Layout (per queue, 256MB total):
+ * ┌──────────────────────────────────────────────────────────────────┐
+ * │ Frames 0 to RING_SIZE-1          │ Frames RING_SIZE to 2*RING_SIZE-1 │
+ * │ (0 to 67MB)                      │ (67MB to 134MB)                    │
+ * │ RX buffer (fill ring)            │ TX buffer (no overlap with RX)    │
+ * └──────────────────────────────────────────────────────────────────┘
+ *
+ * IMPORTANT: TX must use frames >= RING_SIZE to avoid corrupting RX packets!
+ */
+
 // Multi-queue support
 #define MAX_QUEUES      64                      // Max RX queues per interface
 

@@ -205,6 +205,10 @@ int interface_init_local(struct xsk_interface *iface,
         goto err_queues;
     }
 
+    // Initialize TX mutex for thread-safe batch TX
+    iface->pending_tx_count = 0;
+    pthread_mutex_init(&iface->tx_lock, NULL);
+
     printf("[LOCAL] %s ready with %d queues, XDP attached\n", iface->ifname, iface->queue_count);
     return 0;
 
@@ -444,6 +448,8 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     iface->comp = iface->queues[0].comp;
     iface->bufs = iface->queues[0].bufs;
     iface->tx_slot = 0;
+    iface->pending_tx_count = 0;
+    pthread_mutex_init(&iface->tx_lock, NULL);
 
     printf("[WAN] %s ready with %d queues (RX+TX), XDP attached\n", iface->ifname, iface->queue_count);
     return 0;
@@ -465,6 +471,9 @@ err_queues:
 
 void interface_cleanup(struct xsk_interface *iface)
 {
+    // Destroy TX mutex
+    pthread_mutex_destroy(&iface->tx_lock);
+
     // Clean up multi-queue sockets (LOCAL) - each queue has its own UMEM
     for (int q = 0; q < iface->queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
@@ -635,8 +644,9 @@ int interface_send(struct xsk_interface *iface,
             return -1;
     }
 
-    // Use rotating TX buffer slots
-    uint64_t addr = (iface->tx_slot % (FRAME_COUNT / 2)) * FRAME_SIZE;
+    // Use TX buffer slots in SECOND HALF of UMEM to avoid RX overlap
+    // RX uses frames 0 to RING_SIZE-1, TX uses frames RING_SIZE to 2*RING_SIZE-1
+    uint64_t addr = ((iface->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
     iface->tx_slot++;
 
     void *tx_buf = (uint8_t *)iface->bufs + addr;
@@ -721,20 +731,21 @@ void interface_print_stats(struct xsk_interface *iface)
     printf("%s: RX=%lu TX=%lu\n", iface->ifname, iface->rx_packets, iface->tx_packets);
 }
 
-// ============== BATCH TX (High Performance) ==============
-// Track pending TX count per interface
-static __thread int pending_tx_count = 0;
-static __thread int pending_local_tx_count = 0;
+// ============== BATCH TX (High Performance, Thread-Safe) ==============
 
 // Add packet to TX batch (no kick yet) - for WAN
+// Thread-safe: uses mutex
 int interface_send_batch(struct xsk_interface *iface,
                          void *pkt_data, uint32_t pkt_len)
 {
     uint32_t idx;
     struct ether_header *eth;
+    int ret = 0;
+
+    pthread_mutex_lock(&iface->tx_lock);
 
     // Release completed TX buffers periodically
-    if (pending_tx_count == 0) {
+    if (iface->pending_tx_count == 0) {
         uint32_t comp_idx;
         int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
         if (completed > 0)
@@ -744,18 +755,24 @@ int interface_send_batch(struct xsk_interface *iface,
     int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
     if (reserved < 1) {
         // Flush pending and retry
-        interface_send_flush(iface);
+        if (iface->pending_tx_count > 0) {
+            sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+            iface->pending_tx_count = 0;
+        }
         uint32_t comp_idx;
         int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&iface->comp, completed);
         reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
-        if (reserved < 1)
-            return -1;
+        if (reserved < 1) {
+            ret = -1;
+            goto unlock;
+        }
     }
 
-    // Use rotating TX buffer slots
-    uint64_t addr = (iface->tx_slot % (FRAME_COUNT / 2)) * FRAME_SIZE;
+    // Use TX buffer slots in SECOND HALF of UMEM to avoid RX overlap
+    // RX uses frames 0 to RING_SIZE-1, TX uses frames RING_SIZE to 2*RING_SIZE-1
+    uint64_t addr = ((iface->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
     iface->tx_slot++;
 
     void *tx_buf = (uint8_t *)iface->bufs + addr;
@@ -770,37 +787,52 @@ int interface_send_batch(struct xsk_interface *iface,
     xsk_ring_prod__tx_desc(&iface->tx, idx)->len = pkt_len;
     xsk_ring_prod__submit(&iface->tx, 1);
 
-    pending_tx_count++;
-    iface->tx_packets++;
-    iface->tx_bytes += pkt_len;
+    iface->pending_tx_count++;
+    __sync_fetch_and_add(&iface->tx_packets, 1);
+    __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    return 0;
+    // Auto-flush when batch is full
+    if (iface->pending_tx_count >= BATCH_SIZE) {
+        sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        iface->pending_tx_count = 0;
+    }
+
+unlock:
+    pthread_mutex_unlock(&iface->tx_lock);
+    return ret;
 }
 
 // Flush all pending TX packets (kick once)
+// Thread-safe: uses mutex
 void interface_send_flush(struct xsk_interface *iface)
 {
-    if (pending_tx_count > 0) {
+    pthread_mutex_lock(&iface->tx_lock);
+    if (iface->pending_tx_count > 0) {
         sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        pending_tx_count = 0;
+        iface->pending_tx_count = 0;
     }
+    pthread_mutex_unlock(&iface->tx_lock);
 }
 
 // Add packet to LOCAL TX batch
+// Thread-safe: uses mutex
 int interface_send_to_local_batch(struct xsk_interface *iface,
                                   const struct local_config *local_cfg,
                                   void *pkt_data, uint32_t pkt_len)
 {
     uint32_t idx;
     struct ether_header *eth;
+    int ret = 0;
 
     if (iface->queue_count == 0)
         return -1;
 
+    pthread_mutex_lock(&iface->tx_lock);
+
     struct xsk_queue *queue = &iface->queues[0];
 
     // Release completed TX buffers periodically
-    if (pending_local_tx_count == 0) {
+    if (iface->pending_tx_count == 0) {
         uint32_t comp_idx;
         int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
         if (completed > 0)
@@ -810,14 +842,19 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
     if (reserved < 1) {
         // Flush pending and retry
-        interface_send_to_local_flush(iface);
+        if (iface->pending_tx_count > 0) {
+            sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+            iface->pending_tx_count = 0;
+        }
         uint32_t comp_idx;
         int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
         reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
-        if (reserved < 1)
-            return -1;
+        if (reserved < 1) {
+            ret = -1;
+            goto unlock;
+        }
     }
 
     // Use rotating TX buffer slots (second half)
@@ -836,18 +873,32 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
     xsk_ring_prod__submit(&queue->tx, 1);
 
-    pending_local_tx_count++;
-    iface->tx_packets++;
-    iface->tx_bytes += pkt_len;
+    iface->pending_tx_count++;
+    __sync_fetch_and_add(&iface->tx_packets, 1);
+    __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    return 0;
+    // Auto-flush when batch is full
+    if (iface->pending_tx_count >= BATCH_SIZE) {
+        sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        iface->pending_tx_count = 0;
+    }
+
+unlock:
+    pthread_mutex_unlock(&iface->tx_lock);
+    return ret;
 }
 
 // Flush LOCAL TX
+// Thread-safe: uses mutex
 void interface_send_to_local_flush(struct xsk_interface *iface)
 {
-    if (pending_local_tx_count > 0 && iface->queue_count > 0) {
+    if (iface->queue_count == 0)
+        return;
+
+    pthread_mutex_lock(&iface->tx_lock);
+    if (iface->pending_tx_count > 0) {
         sendto(xsk_socket__fd(iface->queues[0].xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        pending_local_tx_count = 0;
+        iface->pending_tx_count = 0;
     }
+    pthread_mutex_unlock(&iface->tx_lock);
 }
