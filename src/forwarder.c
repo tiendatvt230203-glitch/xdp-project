@@ -144,6 +144,9 @@ void forwarder_run(struct forwarder *fwd)
 
             int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
             if (rcvd > 0) {
+                // Track which WANs need flushing
+                int wan_used[MAX_INTERFACES] = {0};
+
                 for (int i = 0; i < rcvd; i++) {
                     // HOOK: Encrypt before sending
                     if (encrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
@@ -153,12 +156,23 @@ void forwarder_run(struct forwarder *fwd)
 
                     // Get WAN (global window - đi đều trên các WAN)
                     struct xsk_interface *wan = get_wan(fwd, pkt_lens[i]);
+                    int wan_idx = fwd->current_wan;
 
-                    if (interface_send(wan, pkt_ptrs[i], pkt_lens[i]) == 0)
+                    // Use batch TX (no kick yet)
+                    if (interface_send_batch(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
                         fwd->local_to_wan++;
-                    else
+                        wan_used[wan_idx] = 1;
+                    } else {
                         fwd->total_dropped++;
+                    }
                 }
+
+                // Flush all WANs that were used
+                for (int w = 0; w < fwd->wan_count; w++) {
+                    if (wan_used[w])
+                        interface_send_flush(&fwd->wans[w]);
+                }
+
                 interface_recv_release(local, addrs, rcvd);
             }
         }
@@ -169,6 +183,9 @@ void forwarder_run(struct forwarder *fwd)
 
             int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
             if (rcvd > 0) {
+                // Track which LOCALs need flushing
+                int local_used[MAX_INTERFACES] = {0};
+
                 for (int i = 0; i < rcvd; i++) {
                     // HOOK: Decrypt after receiving
                     if (decrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
@@ -190,15 +207,24 @@ void forwarder_run(struct forwarder *fwd)
                         continue;
                     }
 
-                    // Forward to LOCAL
+                    // Forward to LOCAL using batch
                     struct xsk_interface *local = &fwd->locals[local_idx];
                     struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
 
-                    if (interface_send_to_local(local, local_cfg, pkt_ptrs[i], pkt_lens[i]) == 0)
+                    if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i]) == 0) {
                         fwd->wan_to_local++;
-                    else
+                        local_used[local_idx] = 1;
+                    } else {
                         fwd->total_dropped++;
+                    }
                 }
+
+                // Flush all LOCALs that were used
+                for (int l = 0; l < fwd->local_count; l++) {
+                    if (local_used[l])
+                        interface_send_to_local_flush(&fwd->locals[l]);
+                }
+
                 interface_recv_release(wan, addrs, rcvd);
             }
         }

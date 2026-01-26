@@ -720,3 +720,134 @@ void interface_print_stats(struct xsk_interface *iface)
 {
     printf("%s: RX=%lu TX=%lu\n", iface->ifname, iface->rx_packets, iface->tx_packets);
 }
+
+// ============== BATCH TX (High Performance) ==============
+// Track pending TX count per interface
+static __thread int pending_tx_count = 0;
+static __thread int pending_local_tx_count = 0;
+
+// Add packet to TX batch (no kick yet) - for WAN
+int interface_send_batch(struct xsk_interface *iface,
+                         void *pkt_data, uint32_t pkt_len)
+{
+    uint32_t idx;
+    struct ether_header *eth;
+
+    // Release completed TX buffers periodically
+    if (pending_tx_count == 0) {
+        uint32_t comp_idx;
+        int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&iface->comp, completed);
+    }
+
+    int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
+    if (reserved < 1) {
+        // Flush pending and retry
+        interface_send_flush(iface);
+        uint32_t comp_idx;
+        int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&iface->comp, completed);
+        reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
+        if (reserved < 1)
+            return -1;
+    }
+
+    // Use rotating TX buffer slots
+    uint64_t addr = (iface->tx_slot % (FRAME_COUNT / 2)) * FRAME_SIZE;
+    iface->tx_slot++;
+
+    void *tx_buf = (uint8_t *)iface->bufs + addr;
+    memcpy(tx_buf, pkt_data, pkt_len);
+
+    // Rewrite MAC
+    eth = (struct ether_header *)tx_buf;
+    memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+    memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+
+    xsk_ring_prod__tx_desc(&iface->tx, idx)->addr = addr;
+    xsk_ring_prod__tx_desc(&iface->tx, idx)->len = pkt_len;
+    xsk_ring_prod__submit(&iface->tx, 1);
+
+    pending_tx_count++;
+    iface->tx_packets++;
+    iface->tx_bytes += pkt_len;
+
+    return 0;
+}
+
+// Flush all pending TX packets (kick once)
+void interface_send_flush(struct xsk_interface *iface)
+{
+    if (pending_tx_count > 0) {
+        sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        pending_tx_count = 0;
+    }
+}
+
+// Add packet to LOCAL TX batch
+int interface_send_to_local_batch(struct xsk_interface *iface,
+                                  const struct local_config *local_cfg,
+                                  void *pkt_data, uint32_t pkt_len)
+{
+    uint32_t idx;
+    struct ether_header *eth;
+
+    if (iface->queue_count == 0)
+        return -1;
+
+    struct xsk_queue *queue = &iface->queues[0];
+
+    // Release completed TX buffers periodically
+    if (pending_local_tx_count == 0) {
+        uint32_t comp_idx;
+        int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&queue->comp, completed);
+    }
+
+    int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+    if (reserved < 1) {
+        // Flush pending and retry
+        interface_send_to_local_flush(iface);
+        uint32_t comp_idx;
+        int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&queue->comp, completed);
+        reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+        if (reserved < 1)
+            return -1;
+    }
+
+    // Use rotating TX buffer slots (second half)
+    uint64_t addr = ((iface->tx_slot % (FRAME_COUNT / 2)) + FRAME_COUNT / 2) * FRAME_SIZE;
+    iface->tx_slot++;
+
+    void *tx_buf = (uint8_t *)queue->bufs + addr;
+    memcpy(tx_buf, pkt_data, pkt_len);
+
+    // Rewrite MAC using local_config
+    eth = (struct ether_header *)tx_buf;
+    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
+    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+
+    xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
+    xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
+    xsk_ring_prod__submit(&queue->tx, 1);
+
+    pending_local_tx_count++;
+    iface->tx_packets++;
+    iface->tx_bytes += pkt_len;
+
+    return 0;
+}
+
+// Flush LOCAL TX
+void interface_send_to_local_flush(struct xsk_interface *iface)
+{
+    if (pending_local_tx_count > 0 && iface->queue_count > 0) {
+        sendto(xsk_socket__fd(iface->queues[0].xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        pending_local_tx_count = 0;
+    }
+}

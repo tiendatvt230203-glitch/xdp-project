@@ -77,14 +77,30 @@ int interface_recv(struct xsk_interface *iface,
 void interface_recv_release(struct xsk_interface *iface,
                             uint64_t *addrs, int count);
 
-// Send packet through WAN interface (rewrites MAC)
+// Send packet through WAN interface (rewrites MAC) - single packet
 int interface_send(struct xsk_interface *iface,
                    void *pkt_data, uint32_t pkt_len);
 
-// Send packet to LOCAL interface (rewrites MAC from local_config)
+// Send packet to LOCAL interface (rewrites MAC from local_config) - single packet
 int interface_send_to_local(struct xsk_interface *iface,
                             const struct local_config *local_cfg,
                             void *pkt_data, uint32_t pkt_len);
+
+// ============== BATCH TX (High Performance) ==============
+// Add packet to TX batch (no kick yet)
+int interface_send_batch(struct xsk_interface *iface,
+                         void *pkt_data, uint32_t pkt_len);
+
+// Flush all pending TX packets (kick once)
+void interface_send_flush(struct xsk_interface *iface);
+
+// Add packet to LOCAL TX batch
+int interface_send_to_local_batch(struct xsk_interface *iface,
+                                  const struct local_config *local_cfg,
+                                  void *pkt_data, uint32_t pkt_len);
+
+// Flush LOCAL TX
+void interface_send_to_local_flush(struct xsk_interface *iface);
 
 // Print interface stats
 void interface_print_stats(struct xsk_interface *iface);
