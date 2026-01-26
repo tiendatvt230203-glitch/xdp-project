@@ -1,0 +1,80 @@
+#ifndef INTERFACE_H
+#define INTERFACE_H
+
+#include "common.h"
+#include "config.h"
+
+// Per-queue socket state
+struct xsk_queue {
+    struct xsk_socket *xsk;
+    struct xsk_ring_prod fill;
+    struct xsk_ring_cons comp;
+    struct xsk_ring_prod tx;
+    struct xsk_ring_cons rx;
+};
+
+// Interface state - supports multiple queues
+struct xsk_interface {
+    // Shared UMEM across all queues
+    struct xsk_umem *umem;
+    void *bufs;
+
+    // Per-queue sockets (for multi-queue RX)
+    struct xsk_queue queues[MAX_QUEUES];
+    int queue_count;
+    int current_queue;              // Round-robin for recv
+
+    // Single socket pointer for WAN (TX only, queue 0)
+    struct xsk_socket *xsk;
+    struct xsk_ring_prod fill;
+    struct xsk_ring_cons comp;
+    struct xsk_ring_prod tx;
+    struct xsk_ring_cons rx;
+
+    // Interface info
+    int ifindex;
+    char ifname[IF_NAMESIZE];
+
+    // MAC addresses for rewriting
+    uint8_t src_mac[MAC_LEN];      // Source MAC (this interface)
+    uint8_t dst_mac[MAC_LEN];      // Destination MAC (remote interface)
+
+    // TX slot tracking
+    uint64_t tx_slot;
+
+    // Stats
+    uint64_t rx_packets;
+    uint64_t tx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+};
+
+// Initialize LOCAL interface (RX with XDP redirect)
+int interface_init_local(struct xsk_interface *iface,
+                         const struct local_config *local_cfg,
+                         const char *bpf_file);
+
+// Initialize WAN interface (TX for forwarding)
+int interface_init_wan(struct xsk_interface *iface,
+                       const struct wan_config *wan_cfg);
+
+// Cleanup interface
+void interface_cleanup(struct xsk_interface *iface);
+
+// Receive packets from LOCAL interface
+int interface_recv(struct xsk_interface *iface,
+                   void **pkt_ptrs, uint32_t *pkt_lens,
+                   uint64_t *addrs, int max_pkts);
+
+// Release RX buffers back to fill queue
+void interface_recv_release(struct xsk_interface *iface,
+                            uint64_t *addrs, int count);
+
+// Send packet through WAN interface (rewrites MAC)
+int interface_send(struct xsk_interface *iface,
+                   void *pkt_data, uint32_t pkt_len);
+
+// Print interface stats
+void interface_print_stats(struct xsk_interface *iface);
+
+#endif
