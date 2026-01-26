@@ -474,7 +474,11 @@ void interface_cleanup(struct xsk_interface *iface)
     // Destroy TX mutex
     pthread_mutex_destroy(&iface->tx_lock);
 
-    // Clean up multi-queue sockets (LOCAL) - each queue has its own UMEM
+    // Detach XDP first
+    if (iface->ifindex)
+        bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+
+    // Clean up multi-queue sockets - each queue has its own UMEM
     for (int q = 0; q < iface->queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
         if (queue->xsk)
@@ -487,20 +491,22 @@ void interface_cleanup(struct xsk_interface *iface)
         }
     }
 
-    // Clean up single socket (WAN)
-    if (iface->xsk)
-        xsk_socket__delete(iface->xsk);
+    // Clean up single socket (old WAN TX-only mode)
+    // NOTE: For WAN with RX, iface->xsk and iface->bufs are aliases to queues[0]
+    // so we should NOT free them again (already freed above)
+    if (iface->queue_count == 0) {
+        // Only cleanup if this is NOT a multi-queue interface
+        if (iface->xsk)
+            xsk_socket__delete(iface->xsk);
 
-    if (iface->umem)
-        xsk_umem__delete(iface->umem);
+        if (iface->umem)
+            xsk_umem__delete(iface->umem);
 
-    if (iface->bufs) {
-        munlock(iface->bufs, UMEM_SIZE);
-        free(iface->bufs);
+        if (iface->bufs) {
+            munlock(iface->bufs, UMEM_SIZE);
+            free(iface->bufs);
+        }
     }
-
-    if (iface->ifindex && bpf_obj)
-        bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
 
     memset(iface, 0, sizeof(*iface));
 }
@@ -744,26 +750,37 @@ int interface_send_batch(struct xsk_interface *iface,
 
     pthread_mutex_lock(&iface->tx_lock);
 
-    // Release completed TX buffers periodically
-    if (iface->pending_tx_count == 0) {
-        uint32_t comp_idx;
-        int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
-        if (completed > 0)
-            xsk_ring_cons__release(&iface->comp, completed);
-    }
+    // ALWAYS drain completion ring to free up TX slots
+    uint32_t comp_idx;
+    int completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
+    if (completed > 0)
+        xsk_ring_cons__release(&iface->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
     if (reserved < 1) {
-        // Flush pending and retry
+        // Flush pending and retry aggressively
         if (iface->pending_tx_count > 0) {
             sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
             iface->pending_tx_count = 0;
         }
-        uint32_t comp_idx;
-        int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
+
+        // Drain completion ring again
+        completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&iface->comp, completed);
-        reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
+
+        // Retry multiple times with small delay
+        for (int retry = 0; retry < 3; retry++) {
+            reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
+            if (reserved >= 1)
+                break;
+            // Small busy-wait to let kernel process
+            for (volatile int i = 0; i < 100; i++);
+            completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
+            if (completed > 0)
+                xsk_ring_cons__release(&iface->comp, completed);
+        }
+
         if (reserved < 1) {
             ret = -1;
             goto unlock;
@@ -791,8 +808,8 @@ int interface_send_batch(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    // Auto-flush when batch is full
-    if (iface->pending_tx_count >= BATCH_SIZE) {
+    // Auto-flush more frequently (every 64 packets) for lower latency
+    if (iface->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         iface->pending_tx_count = 0;
     }
@@ -831,26 +848,37 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
 
     struct xsk_queue *queue = &iface->queues[0];
 
-    // Release completed TX buffers periodically
-    if (iface->pending_tx_count == 0) {
-        uint32_t comp_idx;
-        int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
-        if (completed > 0)
-            xsk_ring_cons__release(&queue->comp, completed);
-    }
+    // ALWAYS drain completion ring to free up TX slots
+    uint32_t comp_idx;
+    int completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
+    if (completed > 0)
+        xsk_ring_cons__release(&queue->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
     if (reserved < 1) {
-        // Flush pending and retry
+        // Flush pending and retry aggressively
         if (iface->pending_tx_count > 0) {
             sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
             iface->pending_tx_count = 0;
         }
-        uint32_t comp_idx;
-        int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+
+        // Drain completion ring again
+        completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
-        reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+
+        // Retry multiple times with small delay
+        for (int retry = 0; retry < 3; retry++) {
+            reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+            if (reserved >= 1)
+                break;
+            // Small busy-wait to let kernel process
+            for (volatile int i = 0; i < 100; i++);
+            completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
+            if (completed > 0)
+                xsk_ring_cons__release(&queue->comp, completed);
+        }
+
         if (reserved < 1) {
             ret = -1;
             goto unlock;
@@ -877,8 +905,8 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    // Auto-flush when batch is full
-    if (iface->pending_tx_count >= BATCH_SIZE) {
+    // Auto-flush more frequently (every 64 packets) for lower latency
+    if (iface->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         iface->pending_tx_count = 0;
     }
