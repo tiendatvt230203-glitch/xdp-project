@@ -6,6 +6,8 @@
 
 #define MAX_INTERFACES 16
 #define MAC_LEN 6
+#define AES_KEY_LEN 16
+#define AES_IV_LEN 16
 
 // LOCAL interface config
 struct local_config {
@@ -36,6 +38,11 @@ struct app_config {
 
     // BPF program file
     char bpf_file[256];
+
+    // Encryption config (AES-128-CTR)
+    int crypto_enabled;                    // 1 = enabled, 0 = disabled
+    uint8_t crypto_key[AES_KEY_LEN];       // 16-byte AES key
+    uint8_t crypto_iv[AES_IV_LEN];         // 16-byte base IV
 };
 
 // Parse config file

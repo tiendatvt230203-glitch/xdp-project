@@ -84,6 +84,38 @@ static const char *mac_to_str(const uint8_t *mac, char *buf, size_t len)
     return buf;
 }
 
+// Parse hex string to bytes (for AES key/IV)
+// Format: "2b7e151628aed2a6abf7158809cf4f3c" (32 hex chars = 16 bytes)
+static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len)
+{
+    int len = strlen(str);
+    if (len != expected_len * 2) {
+        return -1;
+    }
+
+    for (int i = 0; i < expected_len; i++) {
+        unsigned int val;
+        if (sscanf(str + i * 2, "%2x", &val) != 1) {
+            return -1;
+        }
+        out[i] = (uint8_t)val;
+    }
+    return 0;
+}
+
+// Format bytes to hex string
+static const char *bytes_to_hex(const uint8_t *data, int len, char *buf, size_t buflen)
+{
+    if (buflen < (size_t)(len * 2 + 1)) {
+        buf[0] = '\0';
+        return buf;
+    }
+    for (int i = 0; i < len; i++) {
+        sprintf(buf + i * 2, "%02x", data[i]);
+    }
+    return buf;
+}
+
 int config_load(struct app_config *cfg, const char *filename)
 {
     FILE *fp;
@@ -167,6 +199,41 @@ int config_load(struct app_config *cfg, const char *filename)
             sscanf(trimmed, "BPF_FILE %255s", cfg->bpf_file);
             continue;
         }
+
+        // Parse CRYPTO_ENABLED (0 or 1)
+        if (strncmp(trimmed, "CRYPTO_ENABLED ", 15) == 0) {
+            int enabled;
+            if (sscanf(trimmed, "CRYPTO_ENABLED %d", &enabled) == 1) {
+                cfg->crypto_enabled = enabled ? 1 : 0;
+            }
+            continue;
+        }
+
+        // Parse CRYPTO_KEY (32 hex chars = 16 bytes)
+        if (strncmp(trimmed, "CRYPTO_KEY ", 11) == 0) {
+            char key_hex[64];
+            if (sscanf(trimmed, "CRYPTO_KEY %63s", key_hex) == 1) {
+                if (parse_hex_bytes(key_hex, cfg->crypto_key, AES_KEY_LEN) != 0) {
+                    fprintf(stderr, "Invalid CRYPTO_KEY: must be 32 hex characters\n");
+                    fclose(fp);
+                    return -1;
+                }
+            }
+            continue;
+        }
+
+        // Parse CRYPTO_IV (32 hex chars = 16 bytes)
+        if (strncmp(trimmed, "CRYPTO_IV ", 10) == 0) {
+            char iv_hex[64];
+            if (sscanf(trimmed, "CRYPTO_IV %63s", iv_hex) == 1) {
+                if (parse_hex_bytes(iv_hex, cfg->crypto_iv, AES_IV_LEN) != 0) {
+                    fprintf(stderr, "Invalid CRYPTO_IV: must be 32 hex characters\n");
+                    fclose(fp);
+                    return -1;
+                }
+            }
+            continue;
+        }
     }
 
     fclose(fp);
@@ -232,5 +299,12 @@ void config_print(struct app_config *cfg)
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
     printf("║ BPF File: %-52s ║\n", cfg->bpf_file);
+    printf("╠══════════════════════════════════════════════════════════════╣\n");
+    printf("║ Encryption: AES-128-CTR %-38s ║\n", cfg->crypto_enabled ? "[ENABLED]" : "[DISABLED]");
+    if (cfg->crypto_enabled) {
+        char hex_buf[64];
+        printf("║   Key: %s...  ║\n", bytes_to_hex(cfg->crypto_key, 8, hex_buf, sizeof(hex_buf)));
+        printf("║   IV:  %s...  ║\n", bytes_to_hex(cfg->crypto_iv, 8, hex_buf, sizeof(hex_buf)));
+    }
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 }

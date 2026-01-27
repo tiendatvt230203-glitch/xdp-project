@@ -1,4 +1,5 @@
 #include "../inc/forwarder.h"
+#include "../inc/packet_crypto.h"
 #include <signal.h>
 #include <poll.h>
 #include <pthread.h>
@@ -12,6 +13,10 @@
 static volatile int running = 1;
 static pthread_mutex_t wan_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// ============== ENCRYPTION CONFIG ==============
+static struct packet_crypto_ctx crypto_ctx;
+static int crypto_enabled = 0;  // Loaded from config
+
 // Thread arguments
 struct local_thread_args {
     struct forwarder *fwd;
@@ -24,17 +29,31 @@ struct wan_thread_args {
 };
 
 // ============== ENCRYPTION HOOKS ==============
+// Encrypt packet before sending to WAN (LOCAL → WAN)
+// Adds 8-byte nonce, increases packet size
 static int encrypt_packet(void *pkt_data, uint32_t *pkt_len)
 {
-    (void)pkt_data;
-    (void)pkt_len;
+    if (!crypto_enabled) return 0;
+
+    int new_len = packet_encrypt(&crypto_ctx, (uint8_t *)pkt_data, *pkt_len);
+    if (new_len < 0) {
+        return -1;
+    }
+    *pkt_len = (uint32_t)new_len;
     return 0;
 }
 
+// Decrypt packet after receiving from WAN (WAN → LOCAL)
+// Removes 8-byte nonce, decreases packet size
 static int decrypt_packet(void *pkt_data, uint32_t *pkt_len)
 {
-    (void)pkt_data;
-    (void)pkt_len;
+    if (!crypto_enabled) return 0;
+
+    int new_len = packet_decrypt(&crypto_ctx, (uint8_t *)pkt_data, *pkt_len);
+    if (new_len < 0) {
+        return -1;
+    }
+    *pkt_len = (uint32_t)new_len;
     return 0;
 }
 
@@ -196,6 +215,18 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     memset(fwd, 0, sizeof(*fwd));
     fwd->cfg = cfg;
 
+    // Initialize encryption from config
+    crypto_enabled = cfg->crypto_enabled;
+    if (crypto_enabled) {
+        if (packet_crypto_init(&crypto_ctx, cfg->crypto_key, cfg->crypto_iv) != 0) {
+            fprintf(stderr, "Failed to initialize AES-128 encryption\n");
+            return -1;
+        }
+        printf("[FWD] AES-128-CTR encryption ENABLED (key from config)\n");
+    } else {
+        printf("[FWD] Encryption DISABLED\n");
+    }
+
     // Initialize LOCAL interfaces
     for (int i = 0; i < cfg->local_count; i++) {
         if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
@@ -234,6 +265,11 @@ err_locals:
 
 void forwarder_cleanup(struct forwarder *fwd)
 {
+    // Cleanup encryption
+    if (crypto_enabled) {
+        packet_crypto_cleanup(&crypto_ctx);
+    }
+
     for (int i = 0; i < fwd->local_count; i++)
         interface_cleanup(&fwd->locals[i]);
     for (int i = 0; i < fwd->wan_count; i++)
@@ -252,9 +288,10 @@ void forwarder_run(struct forwarder *fwd)
 
     printf("[FWD] Starting threads...\n");
     printf("[FWD] ┌─────────────────────────────────────────────────────┐\n");
-    printf("[FWD] │ LOCAL threads: RX from clients → TX to WANs        │\n");
-    printf("[FWD] │ WAN threads:   RX from WANs → TX to clients        │\n");
-    printf("[FWD] │ Encryption: [HOOK READY]                           │\n");
+    printf("[FWD] │ LOCAL threads: RX from clients → ENCRYPT → WANs   │\n");
+    printf("[FWD] │ WAN threads:   RX from WANs → DECRYPT → clients   │\n");
+    printf("[FWD] │ Encryption: AES-128-CTR %s                    │\n",
+           crypto_enabled ? "[ON] " : "[OFF]");
     printf("[FWD] └─────────────────────────────────────────────────────┘\n\n");
 
     // Start LOCAL RX threads (outbound)
