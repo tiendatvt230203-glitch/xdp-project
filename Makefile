@@ -24,7 +24,9 @@ TOOLS = $(BIN_DIR)/lb_test \
         $(BIN_DIR)/xdp_debug \
         $(BIN_DIR)/xdp_stats \
         $(BIN_DIR)/xdp_full_test \
-        $(BIN_DIR)/xdp_mq_test
+        $(BIN_DIR)/xdp_mq_test \
+        $(BIN_DIR)/local_tx_stress \
+        $(BIN_DIR)/crypto_test
 
 .PHONY: all clean run dirs
 
@@ -52,6 +54,12 @@ $(BIN_DIR)/xdp_full_test: tools/xdp_full_test.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_mq_test: tools/xdp_multiqueue_test.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/local_tx_stress: tools/local_tx_stress.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/crypto_test: tools/crypto_test.c src/packet_crypto.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 %.o: %.c
