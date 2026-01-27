@@ -26,50 +26,54 @@ TOOLS = $(BIN_DIR)/lb_test \
         $(BIN_DIR)/xdp_full_test \
         $(BIN_DIR)/xdp_mq_test \
         $(BIN_DIR)/local_tx_stress \
-        $(BIN_DIR)/crypto_test
+        $(BIN_DIR)/crypto_test \
+        $(BIN_DIR)/packet_dump
 
 .PHONY: all clean run dirs
 
 all: dirs $(BPF_OBJ) $(TARGET) $(TOOLS)
 
 dirs:
-	@mkdir -p $(BIN_DIR)
+        @mkdir -p $(BIN_DIR)
 
 $(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $@ $(LDFLAGS)
+        $(CC) $(OBJ) -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/lb_test: tools/lb_test.c src/config.c src/interface.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_recv_test: tools/xdp_recv_test.c src/config.c src/interface.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_debug: tools/xdp_debug.c src/config.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_stats: tools/xdp_stats.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_full_test: tools/xdp_full_test.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/xdp_mq_test: tools/xdp_multiqueue_test.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/local_tx_stress: tools/local_tx_stress.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/crypto_test: tools/crypto_test.c src/packet_crypto.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/packet_dump: tools/packet_dump.c
+        $(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+        $(CC) $(CFLAGS) -c $< -o $@
 
 bpf/%.o: bpf/%.c
-	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
+        $(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -c $< -o $@
 
 clean:
-	rm -rf $(BIN_DIR) src/*.o *.o $(BPF_OBJ)
+        rm -rf $(BIN_DIR) src/*.o *.o $(BPF_OBJ)
 
 run: all
-	sudo $(TARGET) config.cfg
+        sudo $(TARGET) config.cfg
