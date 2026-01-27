@@ -222,7 +222,12 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
             fprintf(stderr, "Failed to initialize AES-128 encryption\n");
             return -1;
         }
+        // Set fake ethertype from config (0 = disabled)
+        packet_crypto_set_fake_ethertype(cfg->fake_ethertype);
         printf("[FWD] AES-128-CTR encryption ENABLED (key from config)\n");
+        if (cfg->fake_ethertype != 0) {
+            printf("[FWD] Fake EtherType: 0x%04X (protocol obfuscation ON)\n", cfg->fake_ethertype);
+        }
     } else {
         printf("[FWD] Encryption DISABLED\n");
     }

@@ -14,6 +14,9 @@ static uint8_t g_key[AES128_KEY_SIZE];
 static uint8_t g_base_iv[AES128_IV_SIZE];
 static volatile int g_initialized = 0;
 
+/* Fake EtherType (configurable, 0 = disabled) */
+static uint16_t g_fake_ethertype = DEFAULT_FAKE_ETHERTYPE;
+
 /* Thread-local EVP context */
 static __thread EVP_CIPHER_CTX *tls_ctx = NULL;
 static __thread int tls_cipher_ready = 0;
@@ -35,6 +38,11 @@ static EVP_CIPHER_CTX *get_ready_ctx(void)
     }
 
     return tls_ctx;
+}
+
+void packet_crypto_set_fake_ethertype(uint16_t fake_type)
+{
+    g_fake_ethertype = fake_type;
 }
 
 int packet_crypto_init(struct packet_crypto_ctx *ctx,
@@ -137,24 +145,39 @@ int packet_encrypt(struct packet_crypto_ctx *ctx,
     uint8_t *payload = packet + ETH_HEADER_SIZE;
     size_t payload_len = pkt_len - ETH_HEADER_SIZE;
 
+    /* Save original EtherType (bytes 12-13) */
+    uint8_t orig_ethertype[ORIG_ETHERTYPE_SIZE];
+    orig_ethertype[0] = packet[12];
+    orig_ethertype[1] = packet[13];
+
     /* Generate nonce */
     uint8_t nonce[CRYPTO_NONCE_SIZE];
     uint64_t nonce_val = __sync_fetch_and_add(&ctx->counter, 1);
     memcpy(nonce, &nonce_val, CRYPTO_NONCE_SIZE);
 
-    /* Shift payload to make room for nonce */
-    memmove(payload + CRYPTO_NONCE_SIZE, payload, payload_len);
-    memcpy(payload, nonce, CRYPTO_NONCE_SIZE);
+    /* Shift payload to make room for nonce + orig_ethertype */
+    size_t header_size = CRYPTO_NONCE_SIZE + ORIG_ETHERTYPE_SIZE;
+    memmove(payload + header_size, payload, payload_len);
 
-    /* Build IV and encrypt */
+    /* Write nonce and original ethertype */
+    memcpy(payload, nonce, CRYPTO_NONCE_SIZE);
+    memcpy(payload + CRYPTO_NONCE_SIZE, orig_ethertype, ORIG_ETHERTYPE_SIZE);
+
+    /* Build IV and encrypt (encrypt after nonce+orig_type) */
     uint8_t iv[AES128_IV_SIZE];
     build_iv(nonce, iv);
 
-    if (fast_aes_ctr(iv, payload + CRYPTO_NONCE_SIZE, (int)payload_len) != 0) {
+    if (fast_aes_ctr(iv, payload + header_size, (int)payload_len) != 0) {
         return -1;
     }
 
-    return (int)(pkt_len + CRYPTO_NONCE_SIZE);
+    /* Replace EtherType with fake value (if enabled) */
+    if (g_fake_ethertype != 0) {
+        packet[12] = (g_fake_ethertype >> 8) & 0xFF;  /* High byte */
+        packet[13] = g_fake_ethertype & 0xFF;          /* Low byte */
+    }
+
+    return (int)(pkt_len + header_size);
 }
 
 int packet_decrypt(struct packet_crypto_ctx *ctx,
@@ -162,11 +185,14 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
                    size_t pkt_len)
 {
     if (!ctx || !ctx->initialized || !packet) return -1;
-    if (pkt_len <= ETH_HEADER_SIZE + CRYPTO_NONCE_SIZE) return -1;
+
+    size_t header_size = CRYPTO_NONCE_SIZE + ORIG_ETHERTYPE_SIZE;
+    if (pkt_len <= ETH_HEADER_SIZE + header_size) return -1;
 
     uint8_t *nonce = packet + ETH_HEADER_SIZE;
-    uint8_t *encrypted = nonce + CRYPTO_NONCE_SIZE;
-    size_t encrypted_len = pkt_len - ETH_HEADER_SIZE - CRYPTO_NONCE_SIZE;
+    uint8_t *orig_ethertype = nonce + CRYPTO_NONCE_SIZE;
+    uint8_t *encrypted = orig_ethertype + ORIG_ETHERTYPE_SIZE;
+    size_t encrypted_len = pkt_len - ETH_HEADER_SIZE - header_size;
 
     /* Build IV and decrypt */
     uint8_t iv[AES128_IV_SIZE];
@@ -176,10 +202,14 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
         return -1;
     }
 
-    /* Remove nonce space */
+    /* Restore original EtherType */
+    packet[12] = orig_ethertype[0];
+    packet[13] = orig_ethertype[1];
+
+    /* Remove nonce+orig_type space */
     memmove(packet + ETH_HEADER_SIZE, encrypted, encrypted_len);
 
-    return (int)(pkt_len - CRYPTO_NONCE_SIZE);
+    return (int)(pkt_len - header_size);
 }
 
 void packet_crypto_cleanup(struct packet_crypto_ctx *ctx)

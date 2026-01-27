@@ -27,7 +27,8 @@ TOOLS = $(BIN_DIR)/lb_test \
         $(BIN_DIR)/xdp_mq_test \
         $(BIN_DIR)/local_tx_stress \
         $(BIN_DIR)/crypto_test \
-        $(BIN_DIR)/packet_dump
+        $(BIN_DIR)/packet_dump \
+        $(BIN_DIR)/wan_monitor
 
 .PHONY: all clean run dirs
 
@@ -65,6 +66,9 @@ $(BIN_DIR)/crypto_test: tools/crypto_test.c src/packet_crypto.c
 
 $(BIN_DIR)/packet_dump: tools/packet_dump.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/wan_monitor: tools/wan_monitor.c
+	$(CC) $(CFLAGS) $^ -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

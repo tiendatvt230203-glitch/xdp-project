@@ -234,6 +234,22 @@ int config_load(struct app_config *cfg, const char *filename)
             }
             continue;
         }
+
+        // Parse FAKE_ETHERTYPE (4 hex chars = 2 bytes, e.g. "88B5")
+        if (strncmp(trimmed, "FAKE_ETHERTYPE ", 15) == 0) {
+            char type_hex[16];
+            if (sscanf(trimmed, "FAKE_ETHERTYPE %15s", type_hex) == 1) {
+                unsigned int val;
+                if (sscanf(type_hex, "%x", &val) == 1 && val <= 0xFFFF) {
+                    cfg->fake_ethertype = (uint16_t)val;
+                } else {
+                    fprintf(stderr, "Invalid FAKE_ETHERTYPE: must be 4 hex characters (e.g. 88B5)\n");
+                    fclose(fp);
+                    return -1;
+                }
+            }
+            continue;
+        }
     }
 
     fclose(fp);
@@ -305,6 +321,8 @@ void config_print(struct app_config *cfg)
         char hex_buf[64];
         printf("║   Key: %s...  ║\n", bytes_to_hex(cfg->crypto_key, 8, hex_buf, sizeof(hex_buf)));
         printf("║   IV:  %s...  ║\n", bytes_to_hex(cfg->crypto_iv, 8, hex_buf, sizeof(hex_buf)));
+        printf("║   Fake EtherType: 0x%04X %-36s ║\n", cfg->fake_ethertype,
+               cfg->fake_ethertype ? "(obfuscated)" : "(disabled)");
     }
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 }

@@ -43,6 +43,7 @@ struct app_config {
     int crypto_enabled;                    // 1 = enabled, 0 = disabled
     uint8_t crypto_key[AES_KEY_LEN];       // 16-byte AES key
     uint8_t crypto_iv[AES_IV_LEN];         // 16-byte base IV
+    uint16_t fake_ethertype;               // Fake EtherType (2 bytes), e.g. 0x88B5
 };
 
 // Parse config file

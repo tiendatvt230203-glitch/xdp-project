@@ -39,6 +39,17 @@
 /* Nonce size for IV derivation (prepended to encrypted area) */
 #define CRYPTO_NONCE_SIZE     8
 
+/* Default Fake EtherType - IEEE 802 Local Experimental
+ * Thay thế 0x0800 (IPv4) hoặc 0x86DD (IPv6) để ẩn protocol
+ * Hacker không biết đây là traffic gì
+ * Có thể thay đổi qua config file: FAKE_ETHERTYPE xxxx
+ * Set 0 để disable fake ethertype
+ */
+#define DEFAULT_FAKE_ETHERTYPE  0x88B5
+
+/* Size of original EtherType stored in encrypted area */
+#define ORIG_ETHERTYPE_SIZE   2
+
 /*
  * Crypto context - one per thread for thread-safety
  */
@@ -126,5 +137,11 @@ int crypto_decrypt_buffer(struct packet_crypto_ctx *ctx,
  * Cleanup - zeros sensitive data
  */
 void packet_crypto_cleanup(struct packet_crypto_ctx *ctx);
+
+/*
+ * Set fake EtherType (thay đổi từ config)
+ * @param fake_type  2-byte EtherType (e.g. 0x88B5), set 0 to disable
+ */
+void packet_crypto_set_fake_ethertype(uint16_t fake_type);
 
 #endif /* PACKET_CRYPTO_H */
