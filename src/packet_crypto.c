@@ -1,14 +1,27 @@
 /*
- * Packet Encryption Implementation - AES-128 CTR Mode
- * Using OpenSSL AES-NI Hardware Acceleration
+ * Packet Encryption - AES-128 CTR Mode
+ * OpenSSL 3.0 EVP Interface (AES-NI accelerated)
  *
- * OPTIMIZED: Key expanded once, reused for all packets
- * Expected: 3-10+ Gbps with AES-NI
+ * Optimized: Single EVP context, reuse for all packets
  */
 
 #include "packet_crypto.h"
 #include <string.h>
-#include <openssl/aes.h>
+#include <openssl/evp.h>
+
+/* Thread-local EVP context for performance */
+static __thread EVP_CIPHER_CTX *tls_ctx = NULL;
+static __thread int tls_initialized = 0;
+
+/* Get or create thread-local EVP context */
+static EVP_CIPHER_CTX *get_evp_ctx(void)
+{
+    if (!tls_initialized) {
+        tls_ctx = EVP_CIPHER_CTX_new();
+        tls_initialized = 1;
+    }
+    return tls_ctx;
+}
 
 int packet_crypto_init(struct packet_crypto_ctx *ctx,
                        const uint8_t key[AES128_KEY_SIZE],
@@ -16,16 +29,8 @@ int packet_crypto_init(struct packet_crypto_ctx *ctx,
 {
     if (!ctx || !key) return -1;
 
-    /* Expand AES key ONCE (uses AES-NI if available) */
-    AES_KEY aes_key;
-    if (AES_set_encrypt_key(key, 128, &aes_key) != 0) {
-        return -1;
-    }
+    memcpy(ctx->round_key, key, AES128_KEY_SIZE);
 
-    /* Store expanded key */
-    memcpy(ctx->round_key, &aes_key, sizeof(AES_KEY));
-
-    /* Set base IV */
     if (base_iv) {
         memcpy(ctx->base_iv, base_iv, AES128_IV_SIZE);
     } else {
@@ -34,6 +39,15 @@ int packet_crypto_init(struct packet_crypto_ctx *ctx,
 
     ctx->counter = 0;
     ctx->initialized = true;
+
+    /* Pre-initialize thread-local context */
+    EVP_CIPHER_CTX *evp = get_evp_ctx();
+    if (!evp) return -1;
+
+    /* Initialize once with cipher, key - will change IV per packet */
+    if (EVP_EncryptInit_ex(evp, EVP_aes_128_ctr(), NULL, key, ctx->base_iv) != 1) {
+        return -1;
+    }
 
     return 0;
 }
@@ -47,49 +61,29 @@ static inline void build_iv(const struct packet_crypto_ctx *ctx,
     *(uint64_t *)(iv_out + 8) = *(const uint64_t *)nonce;
 }
 
-/* Increment 128-bit counter */
-static inline void increment_iv(uint8_t iv[AES128_IV_SIZE])
-{
-    for (int i = AES128_IV_SIZE - 1; i >= 0; i--) {
-        if (++iv[i] != 0) break;
-    }
-}
-
 /*
- * AES-128 CTR with 64-bit XOR optimization
- * AES_encrypt uses AES-NI automatically on supported CPUs
+ * Fast AES-CTR using pre-initialized EVP context
+ * Only changes IV per call, no cipher re-init
  */
-static void aes_ctr_xcrypt(const AES_KEY *key,
-                           uint8_t *iv,
-                           uint8_t *data,
-                           size_t len)
+static inline int fast_aes_ctr(const uint8_t *key,
+                               const uint8_t *iv,
+                               uint8_t *data,
+                               int len)
 {
-    uint8_t keystream[AES128_BLOCK_SIZE];
-    size_t offset = 0;
+    EVP_CIPHER_CTX *evp = get_evp_ctx();
+    int out_len;
 
-    while (offset < len) {
-        /* Generate keystream block (AES-NI accelerated) */
-        AES_encrypt(iv, keystream, key);
-
-        size_t remaining = len - offset;
-
-        if (remaining >= AES128_BLOCK_SIZE) {
-            /* Full block: 64-bit XOR */
-            uint64_t *d = (uint64_t *)(data + offset);
-            uint64_t *k = (uint64_t *)keystream;
-            d[0] ^= k[0];
-            d[1] ^= k[1];
-            offset += AES128_BLOCK_SIZE;
-        } else {
-            /* Partial block */
-            for (size_t i = 0; i < remaining; i++) {
-                data[offset + i] ^= keystream[i];
-            }
-            offset += remaining;
-        }
-
-        increment_iv(iv);
+    /* Re-init with new IV only (cipher=NULL, key=NULL keeps existing) */
+    if (EVP_EncryptInit_ex(evp, NULL, NULL, key, iv) != 1) {
+        return -1;
     }
+
+    /* Single-shot encrypt */
+    if (EVP_EncryptUpdate(evp, data, &out_len, data, len) != 1) {
+        return -1;
+    }
+
+    return 0;
 }
 
 int crypto_encrypt_buffer(struct packet_crypto_ctx *ctx,
@@ -105,9 +99,7 @@ int crypto_encrypt_buffer(struct packet_crypto_ctx *ctx,
     uint8_t iv[AES128_IV_SIZE];
     build_iv(ctx, nonce_out, iv);
 
-    aes_ctr_xcrypt((const AES_KEY *)ctx->round_key, iv, data, len);
-
-    return 0;
+    return fast_aes_ctr(ctx->round_key, iv, data, (int)len);
 }
 
 int crypto_decrypt_buffer(struct packet_crypto_ctx *ctx,
@@ -120,9 +112,7 @@ int crypto_decrypt_buffer(struct packet_crypto_ctx *ctx,
     uint8_t iv[AES128_IV_SIZE];
     build_iv(ctx, nonce, iv);
 
-    aes_ctr_xcrypt((const AES_KEY *)ctx->round_key, iv, data, len);
-
-    return 0;
+    return fast_aes_ctr(ctx->round_key, iv, data, (int)len);
 }
 
 int packet_encrypt(struct packet_crypto_ctx *ctx,
@@ -144,8 +134,11 @@ int packet_encrypt(struct packet_crypto_ctx *ctx,
 
     uint8_t iv[AES128_IV_SIZE];
     build_iv(ctx, nonce, iv);
-    aes_ctr_xcrypt((const AES_KEY *)ctx->round_key, iv,
-                   payload + CRYPTO_NONCE_SIZE, payload_len);
+
+    if (fast_aes_ctr(ctx->round_key, iv,
+                     payload + CRYPTO_NONCE_SIZE, (int)payload_len) != 0) {
+        return -1;
+    }
 
     return (int)(pkt_len + CRYPTO_NONCE_SIZE);
 }
@@ -163,7 +156,10 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
 
     uint8_t iv[AES128_IV_SIZE];
     build_iv(ctx, nonce, iv);
-    aes_ctr_xcrypt((const AES_KEY *)ctx->round_key, iv, encrypted, encrypted_len);
+
+    if (fast_aes_ctr(ctx->round_key, iv, encrypted, (int)encrypted_len) != 0) {
+        return -1;
+    }
 
     memmove(packet + ETH_HEADER_SIZE, encrypted, encrypted_len);
 
@@ -177,5 +173,11 @@ void packet_crypto_cleanup(struct packet_crypto_ctx *ctx)
         memset(ctx->base_iv, 0, sizeof(ctx->base_iv));
         ctx->counter = 0;
         ctx->initialized = false;
+    }
+
+    if (tls_ctx) {
+        EVP_CIPHER_CTX_free(tls_ctx);
+        tls_ctx = NULL;
+        tls_initialized = 0;
     }
 }
