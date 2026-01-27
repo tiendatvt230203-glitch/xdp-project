@@ -64,7 +64,6 @@ int interface_init_local(struct xsk_interface *iface,
 
     // Get number of RX queues
     int queue_count = get_rx_queue_count(local_cfg->ifname);
-    printf("[LOCAL] %s has %d RX queues\n", local_cfg->ifname, queue_count);
 
     // Load XDP program FIRST (before creating sockets)
     if (!bpf_obj) {
@@ -196,7 +195,6 @@ int interface_init_local(struct xsk_interface *iface,
         queue->tx_slot = 0;
         queue->pending_tx_count = 0;
 
-        printf("[LOCAL] Queue %d: fd=%d, umem=%p, fill=%d frames\n", q, fd, queue->bufs, ret);
         iface->queue_count++;
     }
 
@@ -213,7 +211,6 @@ int interface_init_local(struct xsk_interface *iface,
     iface->pending_tx_count = 0;
     pthread_mutex_init(&iface->tx_lock, NULL);
 
-    printf("[LOCAL] %s ready with %d queues, XDP attached\n", iface->ifname, iface->queue_count);
     return 0;
 
 err_queues:
@@ -320,7 +317,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
 
     // Get number of RX queues
     int queue_count = get_rx_queue_count(wan_cfg->ifname);
-    printf("[WAN-RX] %s has %d RX queues\n", wan_cfg->ifname, queue_count);
 
     // Detach any existing XDP
     bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
@@ -438,7 +434,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         queue->tx_slot = 0;
         queue->pending_tx_count = 0;
 
-        printf("[WAN-RX] Queue %d: fd=%d, fill=%d frames\n", q, fd, ret);
         iface->queue_count++;
     }
 
@@ -459,7 +454,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     iface->pending_tx_count = 0;
     pthread_mutex_init(&iface->tx_lock, NULL);
 
-    printf("[WAN] %s ready with %d queues (RX+TX), XDP attached\n", iface->ifname, iface->queue_count);
     return 0;
 
 err_queues:
@@ -742,7 +736,7 @@ int interface_send_to_local(struct xsk_interface *iface,
 
 void interface_print_stats(struct xsk_interface *iface)
 {
-    printf("%s: RX=%lu TX=%lu\n", iface->ifname, iface->rx_packets, iface->tx_packets);
+    (void)iface;  // Stats disabled for daemon mode
 }
 
 // ============== BATCH TX (High Performance, Thread-Safe) ==============

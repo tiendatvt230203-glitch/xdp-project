@@ -105,8 +105,6 @@ static void *local_rx_thread(void *arg)
     uint32_t pkt_lens[BATCH_SIZE];
     uint64_t addrs[BATCH_SIZE];
 
-    printf("[THREAD] LOCAL[%d] %s started\n", local_idx, local->ifname);
-
     while (running) {
         int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
         if (rcvd > 0) {
@@ -140,7 +138,6 @@ static void *local_rx_thread(void *arg)
         }
     }
 
-    printf("[THREAD] LOCAL[%d] stopped\n", local_idx);
     return NULL;
 }
 
@@ -155,8 +152,6 @@ static void *wan_rx_thread(void *arg)
     void *pkt_ptrs[BATCH_SIZE];
     uint32_t pkt_lens[BATCH_SIZE];
     uint64_t addrs[BATCH_SIZE];
-
-    printf("[THREAD] WAN[%d] %s started\n", wan_idx, wan->ifname);
 
     while (running) {
         int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
@@ -205,7 +200,6 @@ static void *wan_rx_thread(void *arg)
         }
     }
 
-    printf("[THREAD] WAN[%d] stopped\n", wan_idx);
     return NULL;
 }
 
@@ -222,14 +216,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
             fprintf(stderr, "Failed to initialize AES-128 encryption\n");
             return -1;
         }
-        // Set fake ethertype from config (0 = disabled)
         packet_crypto_set_fake_ethertype(cfg->fake_ethertype);
-        printf("[FWD] AES-128-CTR encryption ENABLED (key from config)\n");
-        if (cfg->fake_ethertype != 0) {
-            printf("[FWD] Fake EtherType: 0x%04X (protocol obfuscation ON)\n", cfg->fake_ethertype);
-        }
-    } else {
-        printf("[FWD] Encryption DISABLED\n");
     }
 
     // Initialize LOCAL interfaces
@@ -249,13 +236,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         }
         fwd->wan_count++;
     }
-
-    printf("\n[FWD] ══════════════════════════════════════════════════\n");
-    printf("[FWD] Ready: %d LOCAL, %d WAN\n", fwd->local_count, fwd->wan_count);
-    printf("[FWD] Mode: MULTI-THREADED (%d LOCAL threads + %d WAN threads)\n",
-           fwd->local_count, fwd->wan_count);
-    printf("[FWD] Load Balancer: Global window %dKB\n", WINDOW_SIZE / 1024);
-    printf("[FWD] ══════════════════════════════════════════════════\n\n");
 
     return 0;
 
@@ -291,14 +271,6 @@ void forwarder_run(struct forwarder *fwd)
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
 
-    printf("[FWD] Starting threads...\n");
-    printf("[FWD] ┌─────────────────────────────────────────────────────┐\n");
-    printf("[FWD] │ LOCAL threads: RX from clients → ENCRYPT → WANs   │\n");
-    printf("[FWD] │ WAN threads:   RX from WANs → DECRYPT → clients   │\n");
-    printf("[FWD] │ Encryption: AES-128-CTR %s                    │\n",
-           crypto_enabled ? "[ON] " : "[OFF]");
-    printf("[FWD] └─────────────────────────────────────────────────────┘\n\n");
-
     // Start LOCAL RX threads (outbound)
     for (int i = 0; i < fwd->local_count; i++) {
         local_args[i].fwd = fwd;
@@ -313,45 +285,19 @@ void forwarder_run(struct forwarder *fwd)
         pthread_create(&wan_threads[i], NULL, wan_rx_thread, &wan_args[i]);
     }
 
-    printf("[FWD] All threads running. Press Ctrl+C to stop.\n\n");
-
-    // Stats monitoring in main thread
-    uint64_t last_l2w = 0, last_w2l = 0;
+    // Main thread waits
     while (running) {
-        sleep(2);
-
-        uint64_t l2w = fwd->local_to_wan;
-        uint64_t w2l = fwd->wan_to_local;
-        uint64_t drop = fwd->total_dropped;
-
-        uint64_t l2w_rate = (l2w - last_l2w) / 2;
-        uint64_t w2l_rate = (w2l - last_w2l) / 2;
-
-        printf("[FWD] L→W: %lu (+%lu/s) | W→L: %lu (+%lu/s) | Drop: %lu\n",
-               l2w, l2w_rate, w2l, w2l_rate, drop);
-
-        last_l2w = l2w;
-        last_w2l = w2l;
+        sleep(1);
     }
-
-    printf("\n[FWD] Stopping threads...\n");
 
     // Wait for threads to finish
     for (int i = 0; i < fwd->local_count; i++)
         pthread_join(local_threads[i], NULL);
     for (int i = 0; i < fwd->wan_count; i++)
         pthread_join(wan_threads[i], NULL);
-
-    printf("\n[FWD] ══════════════════════════════════════════════════\n");
-    printf("[FWD] Final Stats:\n");
-    printf("[FWD]   LOCAL → WAN: %lu packets\n", fwd->local_to_wan);
-    printf("[FWD]   WAN → LOCAL: %lu packets\n", fwd->wan_to_local);
-    printf("[FWD]   Dropped:     %lu packets\n", fwd->total_dropped);
-    printf("[FWD] ══════════════════════════════════════════════════\n");
 }
 
 void forwarder_print_stats(struct forwarder *fwd)
 {
-    printf("LOCAL→WAN: %lu | WAN→LOCAL: %lu | Dropped: %lu\n",
-           fwd->local_to_wan, fwd->wan_to_local, fwd->total_dropped);
+    (void)fwd;  // Unused - stats disabled for daemon mode
 }

@@ -47,12 +47,7 @@ int main(int argc, char **argv)
     // Suppress libbpf warnings
     libbpf_set_print(libbpf_print_silent);
 
-    printf("=================================\n");
-    printf("   XDP Packet Forwarder v2.0\n");
-    printf("=================================\n\n");
-
     // Load configuration
-    printf("[MAIN] Loading config from: %s\n", config_file);
     if (config_load(&cfg, config_file) != 0) {
         fprintf(stderr, "Failed to load config\n");
         return 1;
@@ -71,6 +66,5 @@ int main(int argc, char **argv)
     // Cleanup
     forwarder_cleanup(&fwd);
 
-    printf("[MAIN] Exited cleanly.\n");
     return 0;
 }
