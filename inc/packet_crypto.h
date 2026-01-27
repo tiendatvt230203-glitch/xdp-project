@@ -31,7 +31,7 @@
 #define AES128_KEY_SIZE       16
 #define AES128_BLOCK_SIZE     16
 #define AES128_IV_SIZE        16
-#define AES128_ROUND_KEY_SIZE 176
+#define AES128_ROUND_KEY_SIZE 256  /* OpenSSL AES_KEY needs ~244 bytes */
 
 /* Ethernet header size - NOT encrypted */
 #define ETH_HEADER_SIZE       14

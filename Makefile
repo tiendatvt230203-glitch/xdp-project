@@ -60,7 +60,7 @@ $(BIN_DIR)/local_tx_stress: tools/local_tx_stress.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/crypto_test: tools/crypto_test.c src/packet_crypto.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lssl -lcrypto
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
