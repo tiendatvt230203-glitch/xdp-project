@@ -8,7 +8,6 @@
 #define MAC_LEN 6
 #define AES_KEY_LEN 16
 #define AES_IV_LEN 16
-#define DEFAULT_WINDOW_KB 256
 
 struct local_config {
     char ifname[IF_NAMESIZE];
@@ -17,6 +16,7 @@ struct local_config {
     uint32_t network;
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
+    uint32_t umem_mb;
 };
 
 struct wan_config {
@@ -24,6 +24,7 @@ struct wan_config {
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
     uint32_t window_size;
+    uint32_t umem_mb;
 };
 
 struct app_config {

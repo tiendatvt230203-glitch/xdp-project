@@ -25,6 +25,7 @@ struct xsk_interface {
     // Shared UMEM across all queues
     struct xsk_umem *umem;
     void *bufs;
+    size_t umem_size;
 
     // Per-queue sockets (for multi-queue RX)
     struct xsk_queue queues[MAX_QUEUES];

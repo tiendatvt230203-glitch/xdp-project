@@ -117,6 +117,10 @@ int interface_init_local(struct xsk_interface *iface,
         }
     }
 
+    // Calculate UMEM size from config (MB to bytes)
+    size_t local_umem_size = (size_t)local_cfg->umem_mb * 1024 * 1024;
+    iface->umem_size = local_umem_size;
+
     // UMEM config with explicit ring sizes (critical for multi-queue!)
     struct xsk_umem_config umem_cfg = {
         .fill_size = RING_SIZE,
@@ -139,19 +143,19 @@ int interface_init_local(struct xsk_interface *iface,
         uint32_t idx;
 
         // Allocate separate buffer for this queue
-        ret = posix_memalign(&queue->bufs, getpagesize(), UMEM_SIZE);
+        ret = posix_memalign(&queue->bufs, getpagesize(), local_umem_size);
         if (ret || !queue->bufs) {
             fprintf(stderr, "Queue %d: posix_memalign failed\n", q);
             goto err_queues;
         }
-        mlock(queue->bufs, UMEM_SIZE);
+        mlock(queue->bufs, local_umem_size);
 
         // Create separate UMEM for this queue
-        ret = xsk_umem__create(&queue->umem, queue->bufs, UMEM_SIZE,
+        ret = xsk_umem__create(&queue->umem, queue->bufs, local_umem_size,
                                &queue->fill, &queue->comp, &umem_cfg);
         if (ret) {
             fprintf(stderr, "Queue %d: xsk_umem__create failed: %d\n", q, ret);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, local_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -163,7 +167,7 @@ int interface_init_local(struct xsk_interface *iface,
         if (ret) {
             fprintf(stderr, "Queue %d: xsk_socket__create failed: %d\n", q, ret);
             xsk_umem__delete(queue->umem);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, local_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -176,7 +180,7 @@ int interface_init_local(struct xsk_interface *iface,
             fprintf(stderr, "Queue %d: bpf_map_update_elem failed\n", q);
             xsk_socket__delete(queue->xsk);
             xsk_umem__delete(queue->umem);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, local_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -220,7 +224,7 @@ err_queues:
         if (queue->xsk) xsk_socket__delete(queue->xsk);
         if (queue->umem) xsk_umem__delete(queue->umem);
         if (queue->bufs) {
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, iface->umem_size);
             free(queue->bufs);
         }
     }
@@ -249,15 +253,18 @@ int interface_init_wan(struct xsk_interface *iface,
         return -1;
     }
 
-    ret = posix_memalign(&iface->bufs, getpagesize(), UMEM_SIZE);
+    size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
+    iface->umem_size = wan_umem_size;
+
+    ret = posix_memalign(&iface->bufs, getpagesize(), wan_umem_size);
     if (ret || !iface->bufs) {
         perror("posix_memalign");
         return -1;
     }
 
-    mlock(iface->bufs, UMEM_SIZE);
+    mlock(iface->bufs, wan_umem_size);
 
-    ret = xsk_umem__create(&iface->umem, iface->bufs, UMEM_SIZE,
+    ret = xsk_umem__create(&iface->umem, iface->bufs, wan_umem_size,
                            &iface->fill, &iface->comp, NULL);
     if (ret) {
         perror("xsk_umem__create");
@@ -356,6 +363,10 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     }
     wan_xsk_map_fd = bpf_map__fd(map);
 
+    // Calculate UMEM size from config (MB to bytes)
+    size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
+    iface->umem_size = wan_umem_size;
+
     // UMEM config with explicit ring sizes
     struct xsk_umem_config umem_cfg = {
         .fill_size = RING_SIZE,
@@ -378,19 +389,19 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         uint32_t idx;
 
         // Allocate separate buffer for this queue
-        ret = posix_memalign(&queue->bufs, getpagesize(), UMEM_SIZE);
+        ret = posix_memalign(&queue->bufs, getpagesize(), wan_umem_size);
         if (ret || !queue->bufs) {
             fprintf(stderr, "WAN Queue %d: posix_memalign failed\n", q);
             goto err_queues;
         }
-        mlock(queue->bufs, UMEM_SIZE);
+        mlock(queue->bufs, wan_umem_size);
 
         // Create separate UMEM for this queue
-        ret = xsk_umem__create(&queue->umem, queue->bufs, UMEM_SIZE,
+        ret = xsk_umem__create(&queue->umem, queue->bufs, wan_umem_size,
                                &queue->fill, &queue->comp, &umem_cfg);
         if (ret) {
             fprintf(stderr, "WAN Queue %d: xsk_umem__create failed: %d\n", q, ret);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, wan_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -402,7 +413,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         if (ret) {
             fprintf(stderr, "WAN Queue %d: xsk_socket__create failed: %d\n", q, ret);
             xsk_umem__delete(queue->umem);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, wan_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -415,7 +426,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
             fprintf(stderr, "WAN Queue %d: bpf_map_update_elem failed\n", q);
             xsk_socket__delete(queue->xsk);
             xsk_umem__delete(queue->umem);
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, wan_umem_size);
             free(queue->bufs);
             queue->bufs = NULL;
             goto err_queues;
@@ -462,7 +473,7 @@ err_queues:
         if (queue->xsk) xsk_socket__delete(queue->xsk);
         if (queue->umem) xsk_umem__delete(queue->umem);
         if (queue->bufs) {
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, iface->umem_size);
             free(queue->bufs);
         }
     }
@@ -488,7 +499,7 @@ void interface_cleanup(struct xsk_interface *iface)
         if (queue->umem)
             xsk_umem__delete(queue->umem);
         if (queue->bufs) {
-            munlock(queue->bufs, UMEM_SIZE);
+            munlock(queue->bufs, iface->umem_size);
             free(queue->bufs);
         }
     }
@@ -505,7 +516,7 @@ void interface_cleanup(struct xsk_interface *iface)
             xsk_umem__delete(iface->umem);
 
         if (iface->bufs) {
-            munlock(iface->bufs, UMEM_SIZE);
+            munlock(iface->bufs, iface->umem_size);
             free(iface->bufs);
         }
     }

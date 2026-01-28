@@ -123,44 +123,53 @@ int config_load(struct app_config *cfg, const char *filename)
 
         if (strncmp(trimmed, "LOCAL ", 6) == 0 && cfg->local_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], ip_cidr[64], src_mac_str[32], dst_mac_str[32];
+            int umem_mb = 0;
 
-            if (sscanf(trimmed, "LOCAL %15s %63s %31s %31s",
-                       ifname, ip_cidr, src_mac_str, dst_mac_str) == 4) {
+            int parsed = sscanf(trimmed, "LOCAL %15s %63s %31s %31s %d",
+                       ifname, ip_cidr, src_mac_str, dst_mac_str, &umem_mb);
 
-                struct local_config *local = &cfg->locals[cfg->local_count];
-                strncpy(local->ifname, ifname, IF_NAMESIZE - 1);
-
-                if (parse_ip_cidr(ip_cidr, &local->ip, &local->netmask, &local->network) != 0) {
-                    fprintf(stderr, "Invalid LOCAL network: %s\n", ip_cidr);
-                    fclose(fp);
-                    return -1;
-                }
-                if (parse_mac(src_mac_str, local->src_mac) != 0) {
-                    fprintf(stderr, "Invalid LOCAL src_mac: %s\n", src_mac_str);
-                    fclose(fp);
-                    return -1;
-                }
-                if (parse_mac(dst_mac_str, local->dst_mac) != 0) {
-                    fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", dst_mac_str);
-                    fclose(fp);
-                    return -1;
-                }
-
-                cfg->local_count++;
+            if (parsed < 5) {
+                fprintf(stderr, "Invalid LOCAL config: umem_mb is required\n");
+                fprintf(stderr, "Format: LOCAL <interface> <network/mask> <src_mac> <dst_mac> <umem_mb>\n");
+                fclose(fp);
+                return -1;
             }
+
+            struct local_config *local = &cfg->locals[cfg->local_count];
+            strncpy(local->ifname, ifname, IF_NAMESIZE - 1);
+
+            if (parse_ip_cidr(ip_cidr, &local->ip, &local->netmask, &local->network) != 0) {
+                fprintf(stderr, "Invalid LOCAL network: %s\n", ip_cidr);
+                fclose(fp);
+                return -1;
+            }
+            if (parse_mac(src_mac_str, local->src_mac) != 0) {
+                fprintf(stderr, "Invalid LOCAL src_mac: %s\n", src_mac_str);
+                fclose(fp);
+                return -1;
+            }
+            if (parse_mac(dst_mac_str, local->dst_mac) != 0) {
+                fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", dst_mac_str);
+                fclose(fp);
+                return -1;
+            }
+
+            local->umem_mb = umem_mb;
+            cfg->local_count++;
             continue;
         }
 
         if (strncmp(trimmed, "WAN ", 4) == 0 && cfg->wan_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], src_mac_str[32], dst_mac_str[32];
             int window_kb = 0;
+            int umem_mb = 0;
 
-            int parsed = sscanf(trimmed, "WAN %15s %31s %31s %d",
-                               ifname, src_mac_str, dst_mac_str, &window_kb);
+            int parsed = sscanf(trimmed, "WAN %15s %31s %31s %d %d",
+                               ifname, src_mac_str, dst_mac_str, &window_kb, &umem_mb);
 
-            if (parsed < 4) {
-                fprintf(stderr, "Invalid WAN config: window_kb is required\n");
-                fprintf(stderr, "Format: WAN <interface> <src_mac> <dst_mac> <window_kb>\n");
+            if (parsed < 5) {
+                fprintf(stderr, "Invalid WAN config: window_kb and umem_mb are required\n");
+                fprintf(stderr, "Format: WAN <interface> <src_mac> <dst_mac> <window_kb> <umem_mb>\n");
                 fclose(fp);
                 return -1;
             }
@@ -181,6 +190,7 @@ int config_load(struct app_config *cfg, const char *filename)
             }
 
             wan->window_size = window_kb * 1024;
+            wan->umem_mb = umem_mb;
             cfg->wan_count++;
             continue;
         }
@@ -281,6 +291,7 @@ void config_print(struct app_config *cfg)
         printf("║   Netmask: %-52s ║\n", ip_to_str(local->netmask, ip_buf2, sizeof(ip_buf2)));
         printf("║   SRC MAC: %-52s ║\n", mac_to_str(local->src_mac, mac_buf, sizeof(mac_buf)));
         printf("║   DST MAC: %-52s ║\n", mac_to_str(local->dst_mac, mac_buf2, sizeof(mac_buf2)));
+        printf("║   UMEM:    %-52d ║\n", local->umem_mb);
     }
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
@@ -293,6 +304,7 @@ void config_print(struct app_config *cfg)
         printf("║   SRC MAC: %-52s ║\n", mac_to_str(wan->src_mac, mac_buf, sizeof(mac_buf)));
         printf("║   DST MAC: %-52s ║\n", mac_to_str(wan->dst_mac, mac_buf2, sizeof(mac_buf2)));
         printf("║   Window:  %-52d ║\n", wan->window_size / 1024);
+        printf("║   UMEM:    %-52d ║\n", wan->umem_mb);
     }
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
