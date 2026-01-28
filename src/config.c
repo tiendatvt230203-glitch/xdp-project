@@ -5,7 +5,6 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 
-// Parse MAC string "xx:xx:xx:xx:xx:xx" to bytes
 int parse_mac(const char *str, uint8_t *mac)
 {
     int values[6];
@@ -20,7 +19,6 @@ int parse_mac(const char *str, uint8_t *mac)
     return 0;
 }
 
-// Parse IP/CIDR string "192.168.9.1/24"
 static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network)
 {
     char ip_str[32];
@@ -49,14 +47,6 @@ static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint3
     return 0;
 }
 
-// Parse network only "192.168.182.0/24" -> network and mask
-static int parse_network(const char *str, uint32_t *network, uint32_t *netmask)
-{
-    uint32_t ip;
-    return parse_ip_cidr(str, &ip, netmask, network);
-}
-
-// Trim whitespace
 static char *trim(char *str)
 {
     while (isspace((unsigned char)*str)) str++;
@@ -67,7 +57,6 @@ static char *trim(char *str)
     return str;
 }
 
-// Convert IP to string
 static const char *ip_to_str(uint32_t ip, char *buf, size_t len)
 {
     struct in_addr addr;
@@ -76,7 +65,6 @@ static const char *ip_to_str(uint32_t ip, char *buf, size_t len)
     return buf;
 }
 
-// Format MAC to string
 static const char *mac_to_str(const uint8_t *mac, char *buf, size_t len)
 {
     snprintf(buf, len, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -84,8 +72,6 @@ static const char *mac_to_str(const uint8_t *mac, char *buf, size_t len)
     return buf;
 }
 
-// Parse hex string to bytes (for AES key/IV)
-// Format: "2b7e151628aed2a6abf7158809cf4f3c" (32 hex chars = 16 bytes)
 static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len)
 {
     int len = strlen(str);
@@ -103,7 +89,6 @@ static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len)
     return 0;
 }
 
-// Format bytes to hex string
 static const char *bytes_to_hex(const uint8_t *data, int len, char *buf, size_t buflen)
 {
     if (buflen < (size_t)(len * 2 + 1)) {
@@ -136,7 +121,6 @@ int config_load(struct app_config *cfg, const char *filename)
         if (trimmed[0] == '#' || trimmed[0] == '\0')
             continue;
 
-        // Parse LOCAL: LOCAL <interface> <network/mask> <src_mac> <dst_mac>
         if (strncmp(trimmed, "LOCAL ", 6) == 0 && cfg->local_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], ip_cidr[64], src_mac_str[32], dst_mac_str[32];
 
@@ -167,13 +151,14 @@ int config_load(struct app_config *cfg, const char *filename)
             continue;
         }
 
-        // Parse WAN: WAN <interface> <src_mac> <dst_mac>
         if (strncmp(trimmed, "WAN ", 4) == 0 && cfg->wan_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], src_mac_str[32], dst_mac_str[32];
+            int window_kb = DEFAULT_WINDOW_KB;
 
-            if (sscanf(trimmed, "WAN %15s %31s %31s",
-                       ifname, src_mac_str, dst_mac_str) == 3) {
+            int parsed = sscanf(trimmed, "WAN %15s %31s %31s %d",
+                               ifname, src_mac_str, dst_mac_str, &window_kb);
 
+            if (parsed >= 3) {
                 struct wan_config *wan = &cfg->wans[cfg->wan_count];
                 strncpy(wan->ifname, ifname, IF_NAMESIZE - 1);
 
@@ -189,18 +174,21 @@ int config_load(struct app_config *cfg, const char *filename)
                     return -1;
                 }
 
+                if (parsed < 4) {
+                    window_kb = DEFAULT_WINDOW_KB;
+                }
+                wan->window_size = window_kb * 1024;
+
                 cfg->wan_count++;
             }
             continue;
         }
 
-        // Parse BPF_FILE
         if (strncmp(trimmed, "BPF_FILE ", 9) == 0) {
             sscanf(trimmed, "BPF_FILE %255s", cfg->bpf_file);
             continue;
         }
 
-        // Parse CRYPTO_ENABLED (0 or 1)
         if (strncmp(trimmed, "CRYPTO_ENABLED ", 15) == 0) {
             int enabled;
             if (sscanf(trimmed, "CRYPTO_ENABLED %d", &enabled) == 1) {
@@ -209,7 +197,6 @@ int config_load(struct app_config *cfg, const char *filename)
             continue;
         }
 
-        // Parse CRYPTO_KEY (32 hex chars = 16 bytes)
         if (strncmp(trimmed, "CRYPTO_KEY ", 11) == 0) {
             char key_hex[64];
             if (sscanf(trimmed, "CRYPTO_KEY %63s", key_hex) == 1) {
@@ -222,7 +209,6 @@ int config_load(struct app_config *cfg, const char *filename)
             continue;
         }
 
-        // Parse CRYPTO_IV (32 hex chars = 16 bytes)
         if (strncmp(trimmed, "CRYPTO_IV ", 10) == 0) {
             char iv_hex[64];
             if (sscanf(trimmed, "CRYPTO_IV %63s", iv_hex) == 1) {
@@ -235,7 +221,6 @@ int config_load(struct app_config *cfg, const char *filename)
             continue;
         }
 
-        // Parse FAKE_ETHERTYPE (4 hex chars = 2 bytes, e.g. "88B5")
         if (strncmp(trimmed, "FAKE_ETHERTYPE ", 15) == 0) {
             char type_hex[16];
             if (sscanf(trimmed, "FAKE_ETHERTYPE %15s", type_hex) == 1) {
@@ -254,7 +239,6 @@ int config_load(struct app_config *cfg, const char *filename)
 
     fclose(fp);
 
-    // Validate
     if (cfg->local_count == 0) {
         fprintf(stderr, "No LOCAL interface defined\n");
         return -1;
@@ -267,17 +251,15 @@ int config_load(struct app_config *cfg, const char *filename)
     return 0;
 }
 
-// Find LOCAL interface for a given dest IP
 int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip)
 {
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
-        // Check if dest_ip belongs to this network
         if ((dest_ip & local->netmask) == local->network) {
             return i;
         }
     }
-    return -1;  // Not found
+    return -1;
 }
 
 void config_print(struct app_config *cfg)
@@ -289,7 +271,6 @@ void config_print(struct app_config *cfg)
     printf("║                    XDP FORWARDER CONFIG                      ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
-    // LOCALs
     printf("║ LOCAL Interfaces: %d                                          ║\n", cfg->local_count);
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
@@ -303,7 +284,6 @@ void config_print(struct app_config *cfg)
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
-    // WANs
     printf("║ WAN Interfaces: %d                                            ║\n", cfg->wan_count);
     for (int i = 0; i < cfg->wan_count; i++) {
         struct wan_config *wan = &cfg->wans[i];
@@ -311,6 +291,7 @@ void config_print(struct app_config *cfg)
         printf("║ [%d] %-58s ║\n", i, wan->ifname);
         printf("║   SRC MAC: %-52s ║\n", mac_to_str(wan->src_mac, mac_buf, sizeof(mac_buf)));
         printf("║   DST MAC: %-52s ║\n", mac_to_str(wan->dst_mac, mac_buf2, sizeof(mac_buf2)));
+        printf("║   Window:  %-52d ║\n", wan->window_size / 1024);
     }
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");

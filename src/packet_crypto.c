@@ -1,27 +1,16 @@
-/*
- * Packet Encryption - AES-128 CTR Mode
- * OpenSSL 3.0 EVP Interface (AES-NI accelerated)
- *
- * FIXED: Thread-safe with proper per-thread initialization
- */
-
 #include "packet_crypto.h"
 #include <string.h>
 #include <openssl/evp.h>
 
-/* Shared key storage (set once at init, read by all threads) */
 static uint8_t g_key[AES128_KEY_SIZE];
 static uint8_t g_base_iv[AES128_IV_SIZE];
 static volatile int g_initialized = 0;
 
-/* Fake EtherType (configurable, 0 = disabled) */
 static uint16_t g_fake_ethertype = DEFAULT_FAKE_ETHERTYPE;
 
-/* Thread-local EVP context */
 static __thread EVP_CIPHER_CTX *tls_ctx = NULL;
 static __thread int tls_cipher_ready = 0;
 
-/* Get or create thread-local EVP context with cipher initialized */
 static EVP_CIPHER_CTX *get_ready_ctx(void)
 {
     if (!tls_ctx) {
@@ -29,7 +18,6 @@ static EVP_CIPHER_CTX *get_ready_ctx(void)
         if (!tls_ctx) return NULL;
     }
 
-    /* Initialize cipher if not done yet for this thread */
     if (!tls_cipher_ready) {
         if (EVP_EncryptInit_ex(tls_ctx, EVP_aes_128_ctr(), NULL, g_key, g_base_iv) != 1) {
             return NULL;
@@ -51,7 +39,6 @@ int packet_crypto_init(struct packet_crypto_ctx *ctx,
 {
     if (!ctx || !key) return -1;
 
-    /* Store key globally for all threads */
     memcpy(g_key, key, AES128_KEY_SIZE);
     memcpy(ctx->round_key, key, AES128_KEY_SIZE);
 
@@ -67,7 +54,6 @@ int packet_crypto_init(struct packet_crypto_ctx *ctx,
     ctx->initialized = true;
     g_initialized = 1;
 
-    /* Initialize this thread's context */
     if (!get_ready_ctx()) {
         return -1;
     }
@@ -75,7 +61,6 @@ int packet_crypto_init(struct packet_crypto_ctx *ctx,
     return 0;
 }
 
-/* Build IV: [base_iv 8 bytes][nonce 8 bytes] */
 static inline void build_iv(const uint8_t nonce[CRYPTO_NONCE_SIZE],
                             uint8_t iv_out[AES128_IV_SIZE])
 {
@@ -83,9 +68,6 @@ static inline void build_iv(const uint8_t nonce[CRYPTO_NONCE_SIZE],
     memcpy(iv_out + 8, nonce, CRYPTO_NONCE_SIZE);
 }
 
-/*
- * Fast AES-CTR using thread-local EVP context
- */
 static int fast_aes_ctr(const uint8_t *iv, uint8_t *data, int len)
 {
     EVP_CIPHER_CTX *evp = get_ready_ctx();
@@ -93,12 +75,10 @@ static int fast_aes_ctr(const uint8_t *iv, uint8_t *data, int len)
 
     int out_len;
 
-    /* Re-init with new IV (key stays the same) */
     if (EVP_EncryptInit_ex(evp, NULL, NULL, NULL, iv) != 1) {
         return -1;
     }
 
-    /* Encrypt/decrypt */
     if (EVP_EncryptUpdate(evp, data, &out_len, data, len) != 1) {
         return -1;
     }
@@ -145,25 +125,20 @@ int packet_encrypt(struct packet_crypto_ctx *ctx,
     uint8_t *payload = packet + ETH_HEADER_SIZE;
     size_t payload_len = pkt_len - ETH_HEADER_SIZE;
 
-    /* Save original EtherType (bytes 12-13) */
     uint8_t orig_ethertype[ORIG_ETHERTYPE_SIZE];
     orig_ethertype[0] = packet[12];
     orig_ethertype[1] = packet[13];
 
-    /* Generate nonce */
     uint8_t nonce[CRYPTO_NONCE_SIZE];
     uint64_t nonce_val = __sync_fetch_and_add(&ctx->counter, 1);
     memcpy(nonce, &nonce_val, CRYPTO_NONCE_SIZE);
 
-    /* Shift payload to make room for nonce + orig_ethertype */
     size_t header_size = CRYPTO_NONCE_SIZE + ORIG_ETHERTYPE_SIZE;
     memmove(payload + header_size, payload, payload_len);
 
-    /* Write nonce and original ethertype */
     memcpy(payload, nonce, CRYPTO_NONCE_SIZE);
     memcpy(payload + CRYPTO_NONCE_SIZE, orig_ethertype, ORIG_ETHERTYPE_SIZE);
 
-    /* Build IV and encrypt (encrypt after nonce+orig_type) */
     uint8_t iv[AES128_IV_SIZE];
     build_iv(nonce, iv);
 
@@ -171,10 +146,9 @@ int packet_encrypt(struct packet_crypto_ctx *ctx,
         return -1;
     }
 
-    /* Replace EtherType with fake value (if enabled) */
     if (g_fake_ethertype != 0) {
-        packet[12] = (g_fake_ethertype >> 8) & 0xFF;  /* High byte */
-        packet[13] = g_fake_ethertype & 0xFF;          /* Low byte */
+        packet[12] = (g_fake_ethertype >> 8) & 0xFF;
+        packet[13] = g_fake_ethertype & 0xFF;
     }
 
     return (int)(pkt_len + header_size);
@@ -194,7 +168,6 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
     uint8_t *encrypted = orig_ethertype + ORIG_ETHERTYPE_SIZE;
     size_t encrypted_len = pkt_len - ETH_HEADER_SIZE - header_size;
 
-    /* Build IV and decrypt */
     uint8_t iv[AES128_IV_SIZE];
     build_iv(nonce, iv);
 
@@ -202,11 +175,9 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
         return -1;
     }
 
-    /* Restore original EtherType */
     packet[12] = orig_ethertype[0];
     packet[13] = orig_ethertype[1];
 
-    /* Remove nonce+orig_type space */
     memmove(packet + ETH_HEADER_SIZE, encrypted, encrypted_len);
 
     return (int)(pkt_len - header_size);
@@ -221,12 +192,10 @@ void packet_crypto_cleanup(struct packet_crypto_ctx *ctx)
         ctx->initialized = false;
     }
 
-    /* Clear global key */
     memset(g_key, 0, sizeof(g_key));
     memset(g_base_iv, 0, sizeof(g_base_iv));
     g_initialized = 0;
 
-    /* Note: thread-local contexts will be cleaned up when threads exit */
     if (tls_ctx) {
         EVP_CIPHER_CTX_free(tls_ctx);
         tls_ctx = NULL;

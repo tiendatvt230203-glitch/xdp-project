@@ -6,18 +6,12 @@
 #include <netinet/ip.h>
 #include <net/ethernet.h>
 
-// ============== GLOBAL WINDOW LOAD BALANCING ==============
-#define WINDOW_SIZE 65536  // 64KB per WAN
-
-// ============== MULTI-THREAD CONFIG ==============
 static volatile int running = 1;
 static pthread_mutex_t wan_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// ============== ENCRYPTION CONFIG ==============
 static struct packet_crypto_ctx crypto_ctx;
-static int crypto_enabled = 0;  // Loaded from config
+static int crypto_enabled = 0;
 
-// Thread arguments
 struct local_thread_args {
     struct forwarder *fwd;
     int local_idx;
@@ -28,9 +22,6 @@ struct wan_thread_args {
     int wan_idx;
 };
 
-// ============== ENCRYPTION HOOKS ==============
-// Encrypt packet before sending to WAN (LOCAL → WAN)
-// Adds 8-byte nonce, increases packet size
 static int encrypt_packet(void *pkt_data, uint32_t *pkt_len)
 {
     if (!crypto_enabled) return 0;
@@ -43,8 +34,6 @@ static int encrypt_packet(void *pkt_data, uint32_t *pkt_len)
     return 0;
 }
 
-// Decrypt packet after receiving from WAN (WAN → LOCAL)
-// Removes 8-byte nonce, decreases packet size
 static int decrypt_packet(void *pkt_data, uint32_t *pkt_len)
 {
     if (!crypto_enabled) return 0;
@@ -57,7 +46,6 @@ static int decrypt_packet(void *pkt_data, uint32_t *pkt_len)
     return 0;
 }
 
-// ============== HELPERS ==============
 static void sigint_handler(int sig)
 {
     (void)sig;
@@ -75,15 +63,17 @@ static uint32_t get_dest_ip(void *pkt_data, uint32_t pkt_len)
     return ip->daddr;
 }
 
-// Get WAN with lock for thread safety
 static struct xsk_interface *get_wan_locked(struct forwarder *fwd, uint32_t pkt_len, int *wan_idx)
 {
     pthread_mutex_lock(&wan_lock);
 
-    fwd->window_bytes += pkt_len;
-    if (fwd->window_bytes >= WINDOW_SIZE) {
-        fwd->current_wan = (fwd->current_wan + 1) % fwd->wan_count;
-        fwd->window_bytes = 0;
+    int curr = fwd->current_wan;
+    uint32_t window_size = fwd->cfg->wans[curr].window_size;
+
+    fwd->wan_bytes[curr] += pkt_len;
+    if (fwd->wan_bytes[curr] >= window_size) {
+        fwd->wan_bytes[curr] = 0;
+        fwd->current_wan = (curr + 1) % fwd->wan_count;
     }
 
     *wan_idx = fwd->current_wan;
@@ -93,7 +83,6 @@ static struct xsk_interface *get_wan_locked(struct forwarder *fwd, uint32_t pkt_
     return wan;
 }
 
-// ============== THREAD: LOCAL → WAN (Outbound) ==============
 static void *local_rx_thread(void *arg)
 {
     struct local_thread_args *args = (struct local_thread_args *)arg;
@@ -108,7 +97,6 @@ static void *local_rx_thread(void *arg)
     while (running) {
         int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
         if (rcvd > 0) {
-            // Track which WANs need flushing
             int wan_used[MAX_INTERFACES] = {0};
 
             for (int i = 0; i < rcvd; i++) {
@@ -128,7 +116,6 @@ static void *local_rx_thread(void *arg)
                 }
             }
 
-            // Flush all WANs that were used
             for (int w = 0; w < fwd->wan_count; w++) {
                 if (wan_used[w])
                     interface_send_flush(&fwd->wans[w]);
@@ -141,7 +128,6 @@ static void *local_rx_thread(void *arg)
     return NULL;
 }
 
-// ============== THREAD: WAN → LOCAL (Inbound) ==============
 static void *wan_rx_thread(void *arg)
 {
     struct wan_thread_args *args = (struct wan_thread_args *)arg;
@@ -156,7 +142,6 @@ static void *wan_rx_thread(void *arg)
     while (running) {
         int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
         if (rcvd > 0) {
-            // Track which LOCALs need flushing
             int local_used[MAX_INTERFACES] = {0};
 
             for (int i = 0; i < rcvd; i++) {
@@ -180,8 +165,6 @@ static void *wan_rx_thread(void *arg)
                 struct xsk_interface *local = &fwd->locals[local_idx];
                 struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
 
-                // Each WAN thread uses its own TX queue on LOCAL (wan_idx)
-                // This eliminates mutex contention - each thread has dedicated queue!
                 if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i], wan_idx) == 0) {
                     __sync_fetch_and_add(&fwd->wan_to_local, 1);
                     local_used[local_idx] = 1;
@@ -190,7 +173,6 @@ static void *wan_rx_thread(void *arg)
                 }
             }
 
-            // Flush the queue this WAN thread uses
             for (int l = 0; l < fwd->local_count; l++) {
                 if (local_used[l])
                     interface_send_to_local_flush(&fwd->locals[l], wan_idx);
@@ -203,13 +185,11 @@ static void *wan_rx_thread(void *arg)
     return NULL;
 }
 
-// ============== FORWARDER ==============
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 {
     memset(fwd, 0, sizeof(*fwd));
     fwd->cfg = cfg;
 
-    // Initialize encryption from config
     crypto_enabled = cfg->crypto_enabled;
     if (crypto_enabled) {
         if (packet_crypto_init(&crypto_ctx, cfg->crypto_key, cfg->crypto_iv) != 0) {
@@ -219,7 +199,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         packet_crypto_set_fake_ethertype(cfg->fake_ethertype);
     }
 
-    // Initialize LOCAL interfaces
     for (int i = 0; i < cfg->local_count; i++) {
         if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
             fprintf(stderr, "Failed to init LOCAL %s\n", cfg->locals[i].ifname);
@@ -228,7 +207,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fwd->local_count++;
     }
 
-    // Initialize WAN interfaces
     for (int i = 0; i < cfg->wan_count; i++) {
         if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o") != 0) {
             fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
@@ -250,7 +228,6 @@ err_locals:
 
 void forwarder_cleanup(struct forwarder *fwd)
 {
-    // Cleanup encryption
     if (crypto_enabled) {
         packet_crypto_cleanup(&crypto_ctx);
     }
@@ -271,26 +248,22 @@ void forwarder_run(struct forwarder *fwd)
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
 
-    // Start LOCAL RX threads (outbound)
     for (int i = 0; i < fwd->local_count; i++) {
         local_args[i].fwd = fwd;
         local_args[i].local_idx = i;
         pthread_create(&local_threads[i], NULL, local_rx_thread, &local_args[i]);
     }
 
-    // Start WAN RX threads (inbound)
     for (int i = 0; i < fwd->wan_count; i++) {
         wan_args[i].fwd = fwd;
         wan_args[i].wan_idx = i;
         pthread_create(&wan_threads[i], NULL, wan_rx_thread, &wan_args[i]);
     }
 
-    // Main thread waits
     while (running) {
         sleep(1);
     }
 
-    // Wait for threads to finish
     for (int i = 0; i < fwd->local_count; i++)
         pthread_join(local_threads[i], NULL);
     for (int i = 0; i < fwd->wan_count; i++)
@@ -299,5 +272,5 @@ void forwarder_run(struct forwarder *fwd)
 
 void forwarder_print_stats(struct forwarder *fwd)
 {
-    (void)fwd;  // Unused - stats disabled for daemon mode
+    (void)fwd;
 }
