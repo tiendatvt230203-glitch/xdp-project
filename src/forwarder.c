@@ -89,13 +89,14 @@ static void *local_rx_thread(void *arg)
     struct forwarder *fwd = args->fwd;
     int local_idx = args->local_idx;
     struct xsk_interface *local = &fwd->locals[local_idx];
+    int batch_size = local->batch_size;
 
-    void *pkt_ptrs[BATCH_SIZE];
-    uint32_t pkt_lens[BATCH_SIZE];
-    uint64_t addrs[BATCH_SIZE];
+    void *pkt_ptrs[MAX_BATCH_SIZE];
+    uint32_t pkt_lens[MAX_BATCH_SIZE];
+    uint64_t addrs[MAX_BATCH_SIZE];
 
     while (running) {
-        int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
+        int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd > 0) {
             int wan_used[MAX_INTERFACES] = {0};
 
@@ -134,13 +135,14 @@ static void *wan_rx_thread(void *arg)
     struct forwarder *fwd = args->fwd;
     int wan_idx = args->wan_idx;
     struct xsk_interface *wan = &fwd->wans[wan_idx];
+    int batch_size = wan->batch_size;
 
-    void *pkt_ptrs[BATCH_SIZE];
-    uint32_t pkt_lens[BATCH_SIZE];
-    uint64_t addrs[BATCH_SIZE];
+    void *pkt_ptrs[MAX_BATCH_SIZE];
+    uint32_t pkt_lens[MAX_BATCH_SIZE];
+    uint64_t addrs[MAX_BATCH_SIZE];
 
     while (running) {
-        int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, BATCH_SIZE);
+        int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd > 0) {
             int local_used[MAX_INTERFACES] = {0};
 

@@ -12,7 +12,6 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
-// Get number of RX queues from NIC
 static int get_rx_queue_count(const char *ifname)
 {
     struct ethtool_channels channels = {0};
@@ -62,12 +61,9 @@ int interface_init_local(struct xsk_interface *iface,
         return -1;
     }
 
-    // Get number of RX queues
     int queue_count = get_rx_queue_count(local_cfg->ifname);
 
-    // Load XDP program FIRST (before creating sockets)
     if (!bpf_obj) {
-        // Detach any existing XDP
         bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
 
         if (access(bpf_file, F_OK) != 0) {
@@ -117,32 +113,31 @@ int interface_init_local(struct xsk_interface *iface,
         }
     }
 
-    // Calculate UMEM size from config (MB to bytes)
     size_t local_umem_size = (size_t)local_cfg->umem_mb * 1024 * 1024;
     iface->umem_size = local_umem_size;
+    iface->ring_size = local_cfg->ring_size;
+    iface->frame_size = local_cfg->frame_size;
+    iface->batch_size = local_cfg->batch_size;
 
-    // UMEM config with explicit ring sizes (critical for multi-queue!)
     struct xsk_umem_config umem_cfg = {
-        .fill_size = RING_SIZE,
-        .comp_size = RING_SIZE,
-        .frame_size = FRAME_SIZE,
+        .fill_size = local_cfg->ring_size,
+        .comp_size = local_cfg->ring_size,
+        .frame_size = local_cfg->frame_size,
         .frame_headroom = 0,
         .flags = 0
     };
 
     struct xsk_socket_config sock_cfg = {
-        .rx_size = RING_SIZE,
-        .tx_size = RING_SIZE,
+        .rx_size = local_cfg->ring_size,
+        .tx_size = local_cfg->ring_size,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .bind_flags = XDP_COPY
     };
 
-    // Create separate UMEM and socket for each queue
     for (int q = 0; q < queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
         uint32_t idx;
 
-        // Allocate separate buffer for this queue
         ret = posix_memalign(&queue->bufs, getpagesize(), local_umem_size);
         if (ret || !queue->bufs) {
             fprintf(stderr, "Queue %d: posix_memalign failed\n", q);
@@ -150,7 +145,6 @@ int interface_init_local(struct xsk_interface *iface,
         }
         mlock(queue->bufs, local_umem_size);
 
-        // Create separate UMEM for this queue
         ret = xsk_umem__create(&queue->umem, queue->bufs, local_umem_size,
                                &queue->fill, &queue->comp, &umem_cfg);
         if (ret) {
@@ -161,7 +155,6 @@ int interface_init_local(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Create socket for this queue
         ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
                                  &queue->rx, &queue->tx, &sock_cfg);
         if (ret) {
@@ -173,7 +166,6 @@ int interface_init_local(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Register socket in xsks_map
         int fd = xsk_socket__fd(queue->xsk);
         ret = bpf_map_update_elem(xsk_map_fd, &q, &fd, 0);
         if (ret) {
@@ -186,23 +178,20 @@ int interface_init_local(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Fill the fill queue for this queue
-        ret = xsk_ring_prod__reserve(&queue->fill, RING_SIZE, &idx);
-        if (ret != RING_SIZE) {
-            fprintf(stderr, "Queue %d: fill reserve got %d, expected %d\n", q, ret, RING_SIZE);
+        ret = xsk_ring_prod__reserve(&queue->fill, local_cfg->ring_size, &idx);
+        if (ret != (int)local_cfg->ring_size) {
+            fprintf(stderr, "Queue %d: fill reserve got %d, expected %d\n", q, ret, local_cfg->ring_size);
         }
         for (int i = 0; i < ret; i++)
-            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
+            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * local_cfg->frame_size;
         xsk_ring_prod__submit(&queue->fill, ret);
 
-        // Initialize per-queue TX state
         queue->tx_slot = 0;
         queue->pending_tx_count = 0;
 
         iface->queue_count++;
     }
 
-    // Attach XDP AFTER all sockets are created and registered
     prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
     prog_fd = bpf_program__fd(prog);
     ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
@@ -211,14 +200,12 @@ int interface_init_local(struct xsk_interface *iface,
         goto err_queues;
     }
 
-    // Initialize TX mutex for thread-safe batch TX
     iface->pending_tx_count = 0;
     pthread_mutex_init(&iface->tx_lock, NULL);
 
     return 0;
 
 err_queues:
-    // Cleanup already created queues
     for (int j = 0; j < iface->queue_count; j++) {
         struct xsk_queue *queue = &iface->queues[j];
         if (queue->xsk) xsk_socket__delete(queue->xsk);
@@ -255,6 +242,9 @@ int interface_init_wan(struct xsk_interface *iface,
 
     size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
     iface->umem_size = wan_umem_size;
+    iface->ring_size = wan_cfg->ring_size;
+    iface->frame_size = wan_cfg->frame_size;
+    iface->batch_size = wan_cfg->batch_size;
 
     ret = posix_memalign(&iface->bufs, getpagesize(), wan_umem_size);
     if (ret || !iface->bufs) {
@@ -273,8 +263,8 @@ int interface_init_wan(struct xsk_interface *iface,
     }
 
     struct xsk_socket_config sock_cfg = {
-        .rx_size = RING_SIZE,
-        .tx_size = RING_SIZE,
+        .rx_size = wan_cfg->ring_size,
+        .tx_size = wan_cfg->ring_size,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .bind_flags = XDP_COPY
     };
@@ -288,19 +278,16 @@ int interface_init_wan(struct xsk_interface *iface,
         return -1;
     }
 
-    // Fill queue for TX completion recycling
-    ret = xsk_ring_prod__reserve(&iface->fill, RING_SIZE, &idx);
-    for (uint32_t i = 0; i < RING_SIZE; i++)
-        *xsk_ring_prod__fill_addr(&iface->fill, idx++) = i * FRAME_SIZE;
-    xsk_ring_prod__submit(&iface->fill, RING_SIZE);
+    ret = xsk_ring_prod__reserve(&iface->fill, wan_cfg->ring_size, &idx);
+    for (uint32_t i = 0; i < wan_cfg->ring_size; i++)
+        *xsk_ring_prod__fill_addr(&iface->fill, idx++) = i * wan_cfg->frame_size;
+    xsk_ring_prod__submit(&iface->fill, wan_cfg->ring_size);
 
-    // Track next TX slot
     iface->tx_slot = 0;
 
     return 0;
 }
 
-// WAN RX - separate BPF object per WAN interface
 int interface_init_wan_rx(struct xsk_interface *iface,
                           const struct wan_config *wan_cfg,
                           const char *bpf_file)
@@ -322,13 +309,10 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         return -1;
     }
 
-    // Get number of RX queues
     int queue_count = get_rx_queue_count(wan_cfg->ifname);
 
-    // Detach any existing XDP
     bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
 
-    // Load WAN XDP program
     if (access(bpf_file, F_OK) != 0) {
         fprintf(stderr, "WAN XDP object not found: %s\n", bpf_file);
         return -1;
@@ -363,32 +347,31 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     }
     wan_xsk_map_fd = bpf_map__fd(map);
 
-    // Calculate UMEM size from config (MB to bytes)
     size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
     iface->umem_size = wan_umem_size;
+    iface->ring_size = wan_cfg->ring_size;
+    iface->frame_size = wan_cfg->frame_size;
+    iface->batch_size = wan_cfg->batch_size;
 
-    // UMEM config with explicit ring sizes
     struct xsk_umem_config umem_cfg = {
-        .fill_size = RING_SIZE,
-        .comp_size = RING_SIZE,
-        .frame_size = FRAME_SIZE,
+        .fill_size = wan_cfg->ring_size,
+        .comp_size = wan_cfg->ring_size,
+        .frame_size = wan_cfg->frame_size,
         .frame_headroom = 0,
         .flags = 0
     };
 
     struct xsk_socket_config sock_cfg = {
-        .rx_size = RING_SIZE,
-        .tx_size = RING_SIZE,
+        .rx_size = wan_cfg->ring_size,
+        .tx_size = wan_cfg->ring_size,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .bind_flags = XDP_COPY
     };
 
-    // Create separate UMEM and socket for each queue
     for (int q = 0; q < queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
         uint32_t idx;
 
-        // Allocate separate buffer for this queue
         ret = posix_memalign(&queue->bufs, getpagesize(), wan_umem_size);
         if (ret || !queue->bufs) {
             fprintf(stderr, "WAN Queue %d: posix_memalign failed\n", q);
@@ -396,7 +379,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         }
         mlock(queue->bufs, wan_umem_size);
 
-        // Create separate UMEM for this queue
         ret = xsk_umem__create(&queue->umem, queue->bufs, wan_umem_size,
                                &queue->fill, &queue->comp, &umem_cfg);
         if (ret) {
@@ -407,7 +389,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Create socket for this queue
         ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
                                  &queue->rx, &queue->tx, &sock_cfg);
         if (ret) {
@@ -419,7 +400,6 @@ int interface_init_wan_rx(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Register socket in wan_xsks_map
         int fd = xsk_socket__fd(queue->xsk);
         ret = bpf_map_update_elem(wan_xsk_map_fd, &q, &fd, 0);
         if (ret) {
@@ -432,31 +412,26 @@ int interface_init_wan_rx(struct xsk_interface *iface,
             goto err_queues;
         }
 
-        // Fill the fill queue
-        ret = xsk_ring_prod__reserve(&queue->fill, RING_SIZE, &idx);
-        if (ret != RING_SIZE) {
+        ret = xsk_ring_prod__reserve(&queue->fill, wan_cfg->ring_size, &idx);
+        if (ret != (int)wan_cfg->ring_size) {
             fprintf(stderr, "WAN Queue %d: fill reserve got %d\n", q, ret);
         }
         for (int i = 0; i < ret; i++)
-            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * FRAME_SIZE;
+            *xsk_ring_prod__fill_addr(&queue->fill, idx++) = i * wan_cfg->frame_size;
         xsk_ring_prod__submit(&queue->fill, ret);
 
-        // Initialize per-queue TX state
         queue->tx_slot = 0;
         queue->pending_tx_count = 0;
 
         iface->queue_count++;
     }
 
-    // Attach XDP after all sockets created
     ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
     if (ret) {
         fprintf(stderr, "WAN bpf_set_link_xdp_fd failed: %d\n", ret);
         goto err_queues;
     }
 
-    // Set aliases for TX (interface_send uses these fields)
-    // Use queue 0 for TX
     iface->xsk = iface->queues[0].xsk;
     iface->tx = iface->queues[0].tx;
     iface->comp = iface->queues[0].comp;
@@ -484,14 +459,11 @@ err_queues:
 
 void interface_cleanup(struct xsk_interface *iface)
 {
-    // Destroy TX mutex
     pthread_mutex_destroy(&iface->tx_lock);
 
-    // Detach XDP first
     if (iface->ifindex)
         bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
 
-    // Clean up multi-queue sockets - each queue has its own UMEM
     for (int q = 0; q < iface->queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];
         if (queue->xsk)
@@ -504,11 +476,7 @@ void interface_cleanup(struct xsk_interface *iface)
         }
     }
 
-    // Clean up single socket (old WAN TX-only mode)
-    // NOTE: For WAN with RX, iface->xsk and iface->bufs are aliases to queues[0]
-    // so we should NOT free them again (already freed above)
     if (iface->queue_count == 0) {
-        // Only cleanup if this is NOT a multi-queue interface
         if (iface->xsk)
             xsk_socket__delete(iface->xsk);
 
@@ -524,7 +492,6 @@ void interface_cleanup(struct xsk_interface *iface)
     memset(iface, 0, sizeof(*iface));
 }
 
-// Extended address encoding: [queue_id:8][addr:56]
 #define ADDR_ENCODE(q, addr) (((uint64_t)(q) << 56) | ((addr) & 0x00FFFFFFFFFFFFFF))
 #define ADDR_QUEUE(encoded)  ((int)((encoded) >> 56))
 #define ADDR_OFFSET(encoded) ((encoded) & 0x00FFFFFFFFFFFFFF)
@@ -536,11 +503,9 @@ int interface_recv(struct xsk_interface *iface,
     uint32_t idx_rx = 0;
     int total_rcvd = 0;
 
-    // Guard against WAN interface (no queues)
     if (iface->queue_count == 0)
         return 0;
 
-    // Multi-queue: check all queues round-robin
     for (int i = 0; i < iface->queue_count && total_rcvd < max_pkts; i++) {
         int q = (iface->current_queue + i) % iface->queue_count;
         struct xsk_queue *queue = &iface->queues[q];
@@ -551,9 +516,7 @@ int interface_recv(struct xsk_interface *iface,
 
         for (int j = 0; j < rcvd; j++) {
             const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
-            // Encode queue ID in high bits of address
             addrs[total_rcvd + j] = ADDR_ENCODE(q, desc->addr);
-            // Use this queue's buffer
             pkt_ptrs[total_rcvd + j] = (uint8_t *)queue->bufs + desc->addr;
             pkt_lens[total_rcvd + j] = desc->len;
         }
@@ -562,11 +525,9 @@ int interface_recv(struct xsk_interface *iface,
         total_rcvd += rcvd;
     }
 
-    // Update round-robin index
     iface->current_queue = (iface->current_queue + 1) % iface->queue_count;
 
     if (total_rcvd == 0) {
-        // Poll all queues briefly
         struct pollfd fds[MAX_QUEUES];
         for (int q = 0; q < iface->queue_count; q++) {
             fds[q].fd = xsk_socket__fd(iface->queues[q].xsk);
@@ -575,7 +536,6 @@ int interface_recv(struct xsk_interface *iface,
         if (poll(fds, iface->queue_count, 1) <= 0)
             return 0;
 
-        // Retry receive after poll
         for (int q = 0; q < iface->queue_count && total_rcvd < max_pkts; q++) {
             if (!(fds[q].revents & POLLIN))
                 continue;
@@ -587,9 +547,7 @@ int interface_recv(struct xsk_interface *iface,
 
             for (int j = 0; j < rcvd; j++) {
                 const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
-                // Encode queue ID in high bits of address
                 addrs[total_rcvd + j] = ADDR_ENCODE(q, desc->addr);
-                // Use this queue's buffer
                 pkt_ptrs[total_rcvd + j] = (uint8_t *)queue->bufs + desc->addr;
                 pkt_lens[total_rcvd + j] = desc->len;
             }
@@ -606,11 +564,9 @@ int interface_recv(struct xsk_interface *iface,
 void interface_recv_release(struct xsk_interface *iface,
                             uint64_t *addrs, int count)
 {
-    // Guard against WAN interface (no queues)
     if (iface->queue_count == 0)
         return;
 
-    // Group addresses by queue and return to each queue's fill ring
     for (int i = 0; i < count; i++) {
         int q = ADDR_QUEUE(addrs[i]);
         uint64_t addr = ADDR_OFFSET(addrs[i]);
@@ -623,9 +579,8 @@ void interface_recv_release(struct xsk_interface *iface,
 
         int ret = xsk_ring_prod__reserve(&queue->fill, 1, &idx_fill);
         if (ret != 1) {
-            // Try releasing some completions first
             uint32_t comp_idx;
-            int comp = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+            int comp = xsk_ring_cons__peek(&queue->comp, iface->batch_size, &comp_idx);
             if (comp > 0)
                 xsk_ring_cons__release(&queue->comp, comp);
 
@@ -645,17 +600,15 @@ int interface_send(struct xsk_interface *iface,
     uint32_t idx;
     struct ether_header *eth;
 
-    // Release completed TX buffers
     uint32_t comp_idx;
-    int completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
+    int completed = xsk_ring_cons__peek(&iface->comp, iface->batch_size, &comp_idx);
     if (completed > 0)
         xsk_ring_cons__release(&iface->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
     if (reserved < 1) {
-        // Force kick and retry
         sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        completed = xsk_ring_cons__peek(&iface->comp, BATCH_SIZE, &comp_idx);
+        completed = xsk_ring_cons__peek(&iface->comp, iface->batch_size, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&iface->comp, completed);
         reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
@@ -663,15 +616,12 @@ int interface_send(struct xsk_interface *iface,
             return -1;
     }
 
-    // Use TX buffer slots in SECOND HALF of UMEM to avoid RX overlap
-    // RX uses frames 0 to RING_SIZE-1, TX uses frames RING_SIZE to 2*RING_SIZE-1
-    uint64_t addr = ((iface->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
+    uint64_t addr = ((iface->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
     iface->tx_slot++;
 
     void *tx_buf = (uint8_t *)iface->bufs + addr;
     memcpy(tx_buf, pkt_data, pkt_len);
 
-    // Rewrite MAC
     eth = (struct ether_header *)tx_buf;
     memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
     memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
@@ -688,8 +638,6 @@ int interface_send(struct xsk_interface *iface,
     return 0;
 }
 
-// Send packet to LOCAL interface (uses local_config for MAC rewrite)
-// LOCAL uses multi-queue, so we use queue 0 for TX
 int interface_send_to_local(struct xsk_interface *iface,
                             const struct local_config *local_cfg,
                             void *pkt_data, uint32_t pkt_len)
@@ -697,23 +645,20 @@ int interface_send_to_local(struct xsk_interface *iface,
     uint32_t idx;
     struct ether_header *eth;
 
-    // LOCAL uses multi-queue - use queue 0 for TX
     if (iface->queue_count == 0)
         return -1;
 
     struct xsk_queue *queue = &iface->queues[0];
 
-    // Release completed TX buffers
     uint32_t comp_idx;
-    int completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+    int completed = xsk_ring_cons__peek(&queue->comp, iface->batch_size, &comp_idx);
     if (completed > 0)
         xsk_ring_cons__release(&queue->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
     if (reserved < 1) {
-        // Force kick and retry
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        completed = xsk_ring_cons__peek(&queue->comp, BATCH_SIZE, &comp_idx);
+        completed = xsk_ring_cons__peek(&queue->comp, iface->batch_size, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
         reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
@@ -721,17 +666,16 @@ int interface_send_to_local(struct xsk_interface *iface,
             return -1;
     }
 
-    // Use rotating TX buffer slots (use second half of buffer)
-    uint64_t addr = ((iface->tx_slot % (FRAME_COUNT / 2)) + FRAME_COUNT / 2) * FRAME_SIZE;
+    uint32_t frame_count = iface->umem_size / iface->frame_size;
+    uint64_t addr = ((iface->tx_slot % (frame_count / 2)) + frame_count / 2) * iface->frame_size;
     iface->tx_slot++;
 
     void *tx_buf = (uint8_t *)queue->bufs + addr;
     memcpy(tx_buf, pkt_data, pkt_len);
 
-    // Rewrite MAC using local_config
     eth = (struct ether_header *)tx_buf;
-    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);  // Client's MAC
-    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);  // LOCAL interface MAC
+    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
+    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
 
     xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
     xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
@@ -747,13 +691,9 @@ int interface_send_to_local(struct xsk_interface *iface,
 
 void interface_print_stats(struct xsk_interface *iface)
 {
-    (void)iface;  // Stats disabled for daemon mode
+    (void)iface;
 }
 
-// ============== BATCH TX (High Performance, Thread-Safe) ==============
-
-// Add packet to TX batch (no kick yet) - for WAN
-// Thread-safe: uses mutex
 int interface_send_batch(struct xsk_interface *iface,
                          void *pkt_data, uint32_t pkt_len)
 {
@@ -763,33 +703,28 @@ int interface_send_batch(struct xsk_interface *iface,
 
     pthread_mutex_lock(&iface->tx_lock);
 
-    // ALWAYS drain completion ring to free up TX slots
     uint32_t comp_idx;
-    int completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
+    int completed = xsk_ring_cons__peek(&iface->comp, iface->ring_size, &comp_idx);
     if (completed > 0)
         xsk_ring_cons__release(&iface->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
     if (reserved < 1) {
-        // Flush pending and retry aggressively
         if (iface->pending_tx_count > 0) {
             sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
             iface->pending_tx_count = 0;
         }
 
-        // Drain completion ring again
-        completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
+        completed = xsk_ring_cons__peek(&iface->comp, iface->ring_size, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&iface->comp, completed);
 
-        // Retry multiple times with small delay
         for (int retry = 0; retry < 3; retry++) {
             reserved = xsk_ring_prod__reserve(&iface->tx, 1, &idx);
             if (reserved >= 1)
                 break;
-            // Small busy-wait to let kernel process
             for (volatile int i = 0; i < 100; i++);
-            completed = xsk_ring_cons__peek(&iface->comp, RING_SIZE, &comp_idx);
+            completed = xsk_ring_cons__peek(&iface->comp, iface->ring_size, &comp_idx);
             if (completed > 0)
                 xsk_ring_cons__release(&iface->comp, completed);
         }
@@ -800,15 +735,12 @@ int interface_send_batch(struct xsk_interface *iface,
         }
     }
 
-    // Use TX buffer slots in SECOND HALF of UMEM to avoid RX overlap
-    // RX uses frames 0 to RING_SIZE-1, TX uses frames RING_SIZE to 2*RING_SIZE-1
-    uint64_t addr = ((iface->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
+    uint64_t addr = ((iface->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
     iface->tx_slot++;
 
     void *tx_buf = (uint8_t *)iface->bufs + addr;
     memcpy(tx_buf, pkt_data, pkt_len);
 
-    // Rewrite MAC
     eth = (struct ether_header *)tx_buf;
     memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
     memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
@@ -821,7 +753,6 @@ int interface_send_batch(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    // Auto-flush more frequently (every 64 packets) for lower latency
     if (iface->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         iface->pending_tx_count = 0;
@@ -832,8 +763,6 @@ unlock:
     return ret;
 }
 
-// Flush all pending TX packets (kick once)
-// Thread-safe: uses mutex
 void interface_send_flush(struct xsk_interface *iface)
 {
     pthread_mutex_lock(&iface->tx_lock);
@@ -844,8 +773,6 @@ void interface_send_flush(struct xsk_interface *iface)
     pthread_mutex_unlock(&iface->tx_lock);
 }
 
-// Add packet to LOCAL TX batch
-// Each caller should use a different tx_queue for parallel TX (NO MUTEX needed!)
 int interface_send_to_local_batch(struct xsk_interface *iface,
                                   const struct local_config *local_cfg,
                                   void *pkt_data, uint32_t pkt_len,
@@ -857,37 +784,31 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     if (iface->queue_count == 0)
         return -1;
 
-    // Use specified queue (mod queue_count for safety)
     int q = tx_queue % iface->queue_count;
     struct xsk_queue *queue = &iface->queues[q];
 
-    // ALWAYS drain completion ring to free up TX slots
     uint32_t comp_idx;
-    int completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
+    int completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
     if (completed > 0)
         xsk_ring_cons__release(&queue->comp, completed);
 
     int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
     if (reserved < 1) {
-        // Flush pending and retry aggressively
         if (queue->pending_tx_count > 0) {
             sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
             queue->pending_tx_count = 0;
         }
 
-        // Drain completion ring again
-        completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
+        completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
 
-        // Retry multiple times with small delay
         for (int retry = 0; retry < 3; retry++) {
             reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
             if (reserved >= 1)
                 break;
-            // Small busy-wait to let kernel process
             for (volatile int i = 0; i < 100; i++);
-            completed = xsk_ring_cons__peek(&queue->comp, RING_SIZE, &comp_idx);
+            completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
             if (completed > 0)
                 xsk_ring_cons__release(&queue->comp, completed);
         }
@@ -897,15 +818,12 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
         }
     }
 
-    // Use rotating TX buffer slots (second half of this queue's UMEM)
-    // Each queue has its own tx_slot counter - no contention!
-    uint64_t addr = ((queue->tx_slot % RING_SIZE) + RING_SIZE) * FRAME_SIZE;
+    uint64_t addr = ((queue->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
     queue->tx_slot++;
 
     void *tx_buf = (uint8_t *)queue->bufs + addr;
     memcpy(tx_buf, pkt_data, pkt_len);
 
-    // Rewrite MAC using local_config
     eth = (struct ether_header *)tx_buf;
     memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
     memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
@@ -918,7 +836,6 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    // Auto-flush more frequently (every 64 packets) for lower latency
     if (queue->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
@@ -927,7 +844,6 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     return 0;
 }
 
-// Flush LOCAL TX (specific queue - no mutex needed)
 void interface_send_to_local_flush(struct xsk_interface *iface, int tx_queue)
 {
     if (iface->queue_count == 0)

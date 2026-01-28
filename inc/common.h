@@ -19,28 +19,8 @@
 #include <xdp/xsk.h>
 #include <errno.h>
 
-// MAXIMUM BUFFER SETTINGS for 2.5Gbps
-#define FRAME_SIZE      4096                    // 4KB per frame (default)
-#define FRAME_COUNT     (64 * 1024)             // 64K frames
-#define UMEM_SIZE       (FRAME_COUNT * FRAME_SIZE)  // 256MB UMEM per interface
-#define BATCH_SIZE      512                     // Large batch
-#define RING_SIZE       16384                   // 16K ring entries
+#define MAX_QUEUES      64
 
-/*
- * UMEM Layout (per queue, 256MB total):
- * ┌──────────────────────────────────────────────────────────────────┐
- * │ Frames 0 to RING_SIZE-1          │ Frames RING_SIZE to 2*RING_SIZE-1 │
- * │ (0 to 67MB)                      │ (67MB to 134MB)                    │
- * │ RX buffer (fill ring)            │ TX buffer (no overlap with RX)    │
- * └──────────────────────────────────────────────────────────────────┘
- *
- * IMPORTANT: TX must use frames >= RING_SIZE to avoid corrupting RX packets!
- */
-
-// Multi-queue support
-#define MAX_QUEUES      64                      // Max RX queues per interface
-
-// XDP flags
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1U << 1)
 #endif

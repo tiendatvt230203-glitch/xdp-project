@@ -101,13 +101,25 @@ static const char *bytes_to_hex(const uint8_t *data, int len, char *buf, size_t 
     return buf;
 }
 
+enum section_type {
+    SECTION_NONE,
+    SECTION_GLOBAL,
+    SECTION_LOCAL,
+    SECTION_WAN,
+    SECTION_CRYPTO
+};
+
 int config_load(struct app_config *cfg, const char *filename)
 {
     FILE *fp;
     char line[512];
+    enum section_type current_section = SECTION_NONE;
 
     memset(cfg, 0, sizeof(*cfg));
     strncpy(cfg->bpf_file, "bpf/xdp_redirect.o", sizeof(cfg->bpf_file) - 1);
+
+    cfg->global_frame_size = DEFAULT_FRAME_SIZE;
+    cfg->global_batch_size = DEFAULT_BATCH_SIZE;
 
     fp = fopen(filename, "r");
     if (!fp) {
@@ -115,136 +127,148 @@ int config_load(struct app_config *cfg, const char *filename)
         return -1;
     }
 
+    struct local_config *current_local = NULL;
+    struct wan_config *current_wan = NULL;
+
     while (fgets(line, sizeof(line), fp)) {
         char *trimmed = trim(line);
 
         if (trimmed[0] == '#' || trimmed[0] == '\0')
             continue;
 
-        if (strncmp(trimmed, "LOCAL ", 6) == 0 && cfg->local_count < MAX_INTERFACES) {
-            char ifname[IF_NAMESIZE], ip_cidr[64], src_mac_str[32], dst_mac_str[32];
-            int umem_mb = 0;
-
-            int parsed = sscanf(trimmed, "LOCAL %15s %63s %31s %31s %d",
-                       ifname, ip_cidr, src_mac_str, dst_mac_str, &umem_mb);
-
-            if (parsed < 5) {
-                fprintf(stderr, "Invalid LOCAL config: umem_mb is required\n");
-                fprintf(stderr, "Format: LOCAL <interface> <network/mask> <src_mac> <dst_mac> <umem_mb>\n");
-                fclose(fp);
-                return -1;
-            }
-
-            struct local_config *local = &cfg->locals[cfg->local_count];
-            strncpy(local->ifname, ifname, IF_NAMESIZE - 1);
-
-            if (parse_ip_cidr(ip_cidr, &local->ip, &local->netmask, &local->network) != 0) {
-                fprintf(stderr, "Invalid LOCAL network: %s\n", ip_cidr);
-                fclose(fp);
-                return -1;
-            }
-            if (parse_mac(src_mac_str, local->src_mac) != 0) {
-                fprintf(stderr, "Invalid LOCAL src_mac: %s\n", src_mac_str);
-                fclose(fp);
-                return -1;
-            }
-            if (parse_mac(dst_mac_str, local->dst_mac) != 0) {
-                fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", dst_mac_str);
-                fclose(fp);
-                return -1;
-            }
-
-            local->umem_mb = umem_mb;
-            cfg->local_count++;
-            continue;
-        }
-
-        if (strncmp(trimmed, "WAN ", 4) == 0 && cfg->wan_count < MAX_INTERFACES) {
-            char ifname[IF_NAMESIZE], src_mac_str[32], dst_mac_str[32];
-            int window_kb = 0;
-            int umem_mb = 0;
-
-            int parsed = sscanf(trimmed, "WAN %15s %31s %31s %d %d",
-                               ifname, src_mac_str, dst_mac_str, &window_kb, &umem_mb);
-
-            if (parsed < 5) {
-                fprintf(stderr, "Invalid WAN config: window_kb and umem_mb are required\n");
-                fprintf(stderr, "Format: WAN <interface> <src_mac> <dst_mac> <window_kb> <umem_mb>\n");
-                fclose(fp);
-                return -1;
-            }
-
-            struct wan_config *wan = &cfg->wans[cfg->wan_count];
-            strncpy(wan->ifname, ifname, IF_NAMESIZE - 1);
-
-            if (parse_mac(src_mac_str, wan->src_mac) != 0) {
-                fprintf(stderr, "Invalid WAN src_mac: %s\n", src_mac_str);
-                fclose(fp);
-                return -1;
-            }
-
-            if (parse_mac(dst_mac_str, wan->dst_mac) != 0) {
-                fprintf(stderr, "Invalid WAN dst_mac: %s\n", dst_mac_str);
-                fclose(fp);
-                return -1;
-            }
-
-            wan->window_size = window_kb * 1024;
-            wan->umem_mb = umem_mb;
-            cfg->wan_count++;
-            continue;
-        }
-
-        if (strncmp(trimmed, "BPF_FILE ", 9) == 0) {
-            sscanf(trimmed, "BPF_FILE %255s", cfg->bpf_file);
-            continue;
-        }
-
-        if (strncmp(trimmed, "CRYPTO_ENABLED ", 15) == 0) {
-            int enabled;
-            if (sscanf(trimmed, "CRYPTO_ENABLED %d", &enabled) == 1) {
-                cfg->crypto_enabled = enabled ? 1 : 0;
-            }
-            continue;
-        }
-
-        if (strncmp(trimmed, "CRYPTO_KEY ", 11) == 0) {
-            char key_hex[64];
-            if (sscanf(trimmed, "CRYPTO_KEY %63s", key_hex) == 1) {
-                if (parse_hex_bytes(key_hex, cfg->crypto_key, AES_KEY_LEN) != 0) {
-                    fprintf(stderr, "Invalid CRYPTO_KEY: must be 32 hex characters\n");
+        if (trimmed[0] == '[') {
+            if (strcmp(trimmed, "[GLOBAL]") == 0) {
+                current_section = SECTION_GLOBAL;
+            } else if (strcmp(trimmed, "[LOCAL]") == 0) {
+                current_section = SECTION_LOCAL;
+                if (cfg->local_count >= MAX_INTERFACES) {
+                    fprintf(stderr, "Too many LOCAL interfaces\n");
                     fclose(fp);
                     return -1;
                 }
-            }
-            continue;
-        }
-
-        if (strncmp(trimmed, "CRYPTO_IV ", 10) == 0) {
-            char iv_hex[64];
-            if (sscanf(trimmed, "CRYPTO_IV %63s", iv_hex) == 1) {
-                if (parse_hex_bytes(iv_hex, cfg->crypto_iv, AES_IV_LEN) != 0) {
-                    fprintf(stderr, "Invalid CRYPTO_IV: must be 32 hex characters\n");
+                current_local = &cfg->locals[cfg->local_count];
+                memset(current_local, 0, sizeof(*current_local));
+                current_local->frame_size = cfg->global_frame_size;
+                current_local->batch_size = cfg->global_batch_size;
+                cfg->local_count++;
+            } else if (strcmp(trimmed, "[WAN]") == 0) {
+                current_section = SECTION_WAN;
+                if (cfg->wan_count >= MAX_INTERFACES) {
+                    fprintf(stderr, "Too many WAN interfaces\n");
                     fclose(fp);
                     return -1;
                 }
+                current_wan = &cfg->wans[cfg->wan_count];
+                memset(current_wan, 0, sizeof(*current_wan));
+                current_wan->frame_size = cfg->global_frame_size;
+                current_wan->batch_size = cfg->global_batch_size;
+                cfg->wan_count++;
+            } else if (strcmp(trimmed, "[CRYPTO]") == 0) {
+                current_section = SECTION_CRYPTO;
             }
             continue;
         }
 
-        if (strncmp(trimmed, "FAKE_ETHERTYPE ", 15) == 0) {
-            char type_hex[16];
-            if (sscanf(trimmed, "FAKE_ETHERTYPE %15s", type_hex) == 1) {
+        char key[64], value[256];
+        if (sscanf(trimmed, "%63s %255[^\n]", key, value) != 2)
+            continue;
+
+        switch (current_section) {
+        case SECTION_GLOBAL:
+            if (strcmp(key, "frame_size") == 0) {
+                cfg->global_frame_size = atoi(value);
+            } else if (strcmp(key, "batch_size") == 0) {
+                cfg->global_batch_size = atoi(value);
+            }
+            break;
+
+        case SECTION_LOCAL:
+            if (!current_local) break;
+            if (strcmp(key, "interface") == 0) {
+                strncpy(current_local->ifname, value, IF_NAMESIZE - 1);
+            } else if (strcmp(key, "network") == 0) {
+                if (parse_ip_cidr(value, &current_local->ip, &current_local->netmask, &current_local->network) != 0) {
+                    fprintf(stderr, "Invalid LOCAL network: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "src_mac") == 0) {
+                if (parse_mac(value, current_local->src_mac) != 0) {
+                    fprintf(stderr, "Invalid LOCAL src_mac: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "dst_mac") == 0) {
+                if (parse_mac(value, current_local->dst_mac) != 0) {
+                    fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "umem_mb") == 0) {
+                current_local->umem_mb = atoi(value);
+            } else if (strcmp(key, "ring_size") == 0) {
+                current_local->ring_size = atoi(value);
+            } else if (strcmp(key, "frame_size") == 0) {
+                current_local->frame_size = atoi(value);
+            } else if (strcmp(key, "batch_size") == 0) {
+                current_local->batch_size = atoi(value);
+            }
+            break;
+
+        case SECTION_WAN:
+            if (!current_wan) break;
+            if (strcmp(key, "interface") == 0) {
+                strncpy(current_wan->ifname, value, IF_NAMESIZE - 1);
+            } else if (strcmp(key, "src_mac") == 0) {
+                if (parse_mac(value, current_wan->src_mac) != 0) {
+                    fprintf(stderr, "Invalid WAN src_mac: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "dst_mac") == 0) {
+                if (parse_mac(value, current_wan->dst_mac) != 0) {
+                    fprintf(stderr, "Invalid WAN dst_mac: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "window_kb") == 0) {
+                current_wan->window_size = atoi(value) * 1024;
+            } else if (strcmp(key, "umem_mb") == 0) {
+                current_wan->umem_mb = atoi(value);
+            } else if (strcmp(key, "ring_size") == 0) {
+                current_wan->ring_size = atoi(value);
+            } else if (strcmp(key, "frame_size") == 0) {
+                current_wan->frame_size = atoi(value);
+            } else if (strcmp(key, "batch_size") == 0) {
+                current_wan->batch_size = atoi(value);
+            }
+            break;
+
+        case SECTION_CRYPTO:
+            if (strcmp(key, "enabled") == 0) {
+                cfg->crypto_enabled = atoi(value);
+            } else if (strcmp(key, "key") == 0) {
+                if (parse_hex_bytes(value, cfg->crypto_key, AES_KEY_LEN) != 0) {
+                    fprintf(stderr, "Invalid CRYPTO key\n");
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "iv") == 0) {
+                if (parse_hex_bytes(value, cfg->crypto_iv, AES_IV_LEN) != 0) {
+                    fprintf(stderr, "Invalid CRYPTO iv\n");
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "fake_ethertype") == 0) {
                 unsigned int val;
-                if (sscanf(type_hex, "%x", &val) == 1 && val <= 0xFFFF) {
+                if (sscanf(value, "%x", &val) == 1 && val <= 0xFFFF) {
                     cfg->fake_ethertype = (uint16_t)val;
-                } else {
-                    fprintf(stderr, "Invalid FAKE_ETHERTYPE: must be 4 hex characters (e.g. 88B5)\n");
-                    fclose(fp);
-                    return -1;
                 }
             }
-            continue;
+            break;
+
+        default:
+            break;
         }
     }
 
@@ -257,6 +281,63 @@ int config_load(struct app_config *cfg, const char *filename)
     if (cfg->wan_count == 0) {
         fprintf(stderr, "No WAN interface defined\n");
         return -1;
+    }
+
+    return config_validate(cfg);
+}
+
+int config_validate(struct app_config *cfg)
+{
+    for (int i = 0; i < cfg->local_count; i++) {
+        struct local_config *local = &cfg->locals[i];
+
+        if (local->ifname[0] == '\0') {
+            fprintf(stderr, "LOCAL[%d]: interface not specified\n", i);
+            return -1;
+        }
+        if (local->umem_mb == 0) {
+            fprintf(stderr, "LOCAL %s: umem_mb not specified\n", local->ifname);
+            return -1;
+        }
+        if (local->ring_size == 0) {
+            fprintf(stderr, "LOCAL %s: ring_size not specified\n", local->ifname);
+            return -1;
+        }
+
+        uint32_t min_umem_mb = (local->ring_size * 2 * local->frame_size) / (1024 * 1024);
+        if (local->umem_mb < min_umem_mb) {
+            fprintf(stderr, "LOCAL %s: umem_mb=%d too small for ring_size=%d (min: %d)\n",
+                    local->ifname, local->umem_mb, local->ring_size, min_umem_mb);
+            return -1;
+        }
+    }
+
+    for (int i = 0; i < cfg->wan_count; i++) {
+        struct wan_config *wan = &cfg->wans[i];
+
+        if (wan->ifname[0] == '\0') {
+            fprintf(stderr, "WAN[%d]: interface not specified\n", i);
+            return -1;
+        }
+        if (wan->umem_mb == 0) {
+            fprintf(stderr, "WAN %s: umem_mb not specified\n", wan->ifname);
+            return -1;
+        }
+        if (wan->ring_size == 0) {
+            fprintf(stderr, "WAN %s: ring_size not specified\n", wan->ifname);
+            return -1;
+        }
+        if (wan->window_size == 0) {
+            fprintf(stderr, "WAN %s: window_kb not specified\n", wan->ifname);
+            return -1;
+        }
+
+        uint32_t min_umem_mb = (wan->ring_size * 2 * wan->frame_size) / (1024 * 1024);
+        if (wan->umem_mb < min_umem_mb) {
+            fprintf(stderr, "WAN %s: umem_mb=%d too small for ring_size=%d (min: %d)\n",
+                    wan->ifname, wan->umem_mb, wan->ring_size, min_umem_mb);
+            return -1;
+        }
     }
 
     return 0;
@@ -282,41 +363,41 @@ void config_print(struct app_config *cfg)
     printf("║                    XDP FORWARDER CONFIG                      ║\n");
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
-    printf("║ LOCAL Interfaces: %d                                          ║\n", cfg->local_count);
+    printf("║ [GLOBAL]                                                     ║\n");
+    printf("║   frame_size: %-48d ║\n", cfg->global_frame_size);
+    printf("║   batch_size: %-48d ║\n", cfg->global_batch_size);
+
+    printf("╠══════════════════════════════════════════════════════════════╣\n");
+
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
+        printf("║ [LOCAL] %-54s ║\n", local->ifname);
+        printf("║   network:   %-52s ║\n", ip_to_str(local->network, ip_buf, sizeof(ip_buf)));
+        printf("║   netmask:   %-52s ║\n", ip_to_str(local->netmask, ip_buf2, sizeof(ip_buf2)));
+        printf("║   src_mac:   %-52s ║\n", mac_to_str(local->src_mac, mac_buf, sizeof(mac_buf)));
+        printf("║   dst_mac:   %-52s ║\n", mac_to_str(local->dst_mac, mac_buf2, sizeof(mac_buf2)));
+        printf("║   umem_mb:   %-3d  ring_size: %-6d  frame_size: %-5d    ║\n",
+               local->umem_mb, local->ring_size, local->frame_size);
         printf("╟──────────────────────────────────────────────────────────────╢\n");
-        printf("║ [%d] %-58s ║\n", i, local->ifname);
-        printf("║   Network: %-52s ║\n", ip_to_str(local->network, ip_buf, sizeof(ip_buf)));
-        printf("║   Netmask: %-52s ║\n", ip_to_str(local->netmask, ip_buf2, sizeof(ip_buf2)));
-        printf("║   SRC MAC: %-52s ║\n", mac_to_str(local->src_mac, mac_buf, sizeof(mac_buf)));
-        printf("║   DST MAC: %-52s ║\n", mac_to_str(local->dst_mac, mac_buf2, sizeof(mac_buf2)));
-        printf("║   UMEM:    %-52d ║\n", local->umem_mb);
     }
 
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-
-    printf("║ WAN Interfaces: %d                                            ║\n", cfg->wan_count);
     for (int i = 0; i < cfg->wan_count; i++) {
         struct wan_config *wan = &cfg->wans[i];
+        printf("║ [WAN] %-56s ║\n", wan->ifname);
+        printf("║   src_mac:   %-52s ║\n", mac_to_str(wan->src_mac, mac_buf, sizeof(mac_buf)));
+        printf("║   dst_mac:   %-52s ║\n", mac_to_str(wan->dst_mac, mac_buf2, sizeof(mac_buf2)));
+        printf("║   window_kb: %-52d ║\n", wan->window_size / 1024);
+        printf("║   umem_mb:   %-3d  ring_size: %-6d  frame_size: %-5d    ║\n",
+               wan->umem_mb, wan->ring_size, wan->frame_size);
         printf("╟──────────────────────────────────────────────────────────────╢\n");
-        printf("║ [%d] %-58s ║\n", i, wan->ifname);
-        printf("║   SRC MAC: %-52s ║\n", mac_to_str(wan->src_mac, mac_buf, sizeof(mac_buf)));
-        printf("║   DST MAC: %-52s ║\n", mac_to_str(wan->dst_mac, mac_buf2, sizeof(mac_buf2)));
-        printf("║   Window:  %-52d ║\n", wan->window_size / 1024);
-        printf("║   UMEM:    %-52d ║\n", wan->umem_mb);
     }
 
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║ BPF File: %-52s ║\n", cfg->bpf_file);
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║ Encryption: AES-128-CTR %-38s ║\n", cfg->crypto_enabled ? "[ENABLED]" : "[DISABLED]");
+    printf("║ [CRYPTO] %-53s ║\n", cfg->crypto_enabled ? "ENABLED" : "DISABLED");
     if (cfg->crypto_enabled) {
         char hex_buf[64];
-        printf("║   Key: %s...  ║\n", bytes_to_hex(cfg->crypto_key, 8, hex_buf, sizeof(hex_buf)));
-        printf("║   IV:  %s...  ║\n", bytes_to_hex(cfg->crypto_iv, 8, hex_buf, sizeof(hex_buf)));
-        printf("║   Fake EtherType: 0x%04X %-36s ║\n", cfg->fake_ethertype,
-               cfg->fake_ethertype ? "(obfuscated)" : "(disabled)");
+        printf("║   key: %s...                              ║\n", bytes_to_hex(cfg->crypto_key, 8, hex_buf, sizeof(hex_buf)));
+        printf("║   iv:  %s...                              ║\n", bytes_to_hex(cfg->crypto_iv, 8, hex_buf, sizeof(hex_buf)));
+        printf("║   fake_ethertype: 0x%04X                                     ║\n", cfg->fake_ethertype);
     }
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 }

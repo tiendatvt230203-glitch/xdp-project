@@ -9,6 +9,12 @@
 #define AES_KEY_LEN 16
 #define AES_IV_LEN 16
 
+#define DEFAULT_FRAME_SIZE  4096
+#define DEFAULT_BATCH_SIZE  256
+#define DEFAULT_RING_SIZE   4096
+#define DEFAULT_UMEM_MB     64
+#define MAX_BATCH_SIZE      1024
+
 struct local_config {
     char ifname[IF_NAMESIZE];
     uint32_t ip;
@@ -17,6 +23,9 @@ struct local_config {
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
     uint32_t umem_mb;
+    uint32_t ring_size;
+    uint32_t batch_size;
+    uint32_t frame_size;
 };
 
 struct wan_config {
@@ -25,9 +34,15 @@ struct wan_config {
     uint8_t dst_mac[MAC_LEN];
     uint32_t window_size;
     uint32_t umem_mb;
+    uint32_t ring_size;
+    uint32_t batch_size;
+    uint32_t frame_size;
 };
 
 struct app_config {
+    uint32_t global_frame_size;
+    uint32_t global_batch_size;
+
     struct local_config locals[MAX_INTERFACES];
     int local_count;
 
@@ -46,5 +61,6 @@ int config_load(struct app_config *cfg, const char *filename);
 void config_print(struct app_config *cfg);
 int parse_mac(const char *str, uint8_t *mac);
 int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip);
+int config_validate(struct app_config *cfg);
 
 #endif
