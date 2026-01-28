@@ -153,34 +153,35 @@ int config_load(struct app_config *cfg, const char *filename)
 
         if (strncmp(trimmed, "WAN ", 4) == 0 && cfg->wan_count < MAX_INTERFACES) {
             char ifname[IF_NAMESIZE], src_mac_str[32], dst_mac_str[32];
-            int window_kb = DEFAULT_WINDOW_KB;
+            int window_kb = 0;
 
             int parsed = sscanf(trimmed, "WAN %15s %31s %31s %d",
                                ifname, src_mac_str, dst_mac_str, &window_kb);
 
-            if (parsed >= 3) {
-                struct wan_config *wan = &cfg->wans[cfg->wan_count];
-                strncpy(wan->ifname, ifname, IF_NAMESIZE - 1);
-
-                if (parse_mac(src_mac_str, wan->src_mac) != 0) {
-                    fprintf(stderr, "Invalid WAN src_mac: %s\n", src_mac_str);
-                    fclose(fp);
-                    return -1;
-                }
-
-                if (parse_mac(dst_mac_str, wan->dst_mac) != 0) {
-                    fprintf(stderr, "Invalid WAN dst_mac: %s\n", dst_mac_str);
-                    fclose(fp);
-                    return -1;
-                }
-
-                if (parsed < 4) {
-                    window_kb = DEFAULT_WINDOW_KB;
-                }
-                wan->window_size = window_kb * 1024;
-
-                cfg->wan_count++;
+            if (parsed < 4) {
+                fprintf(stderr, "Invalid WAN config: window_kb is required\n");
+                fprintf(stderr, "Format: WAN <interface> <src_mac> <dst_mac> <window_kb>\n");
+                fclose(fp);
+                return -1;
             }
+
+            struct wan_config *wan = &cfg->wans[cfg->wan_count];
+            strncpy(wan->ifname, ifname, IF_NAMESIZE - 1);
+
+            if (parse_mac(src_mac_str, wan->src_mac) != 0) {
+                fprintf(stderr, "Invalid WAN src_mac: %s\n", src_mac_str);
+                fclose(fp);
+                return -1;
+            }
+
+            if (parse_mac(dst_mac_str, wan->dst_mac) != 0) {
+                fprintf(stderr, "Invalid WAN dst_mac: %s\n", dst_mac_str);
+                fclose(fp);
+                return -1;
+            }
+
+            wan->window_size = window_kb * 1024;
+            cfg->wan_count++;
             continue;
         }
 
