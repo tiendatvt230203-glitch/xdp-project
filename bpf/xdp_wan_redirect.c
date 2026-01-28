@@ -1,12 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0
-// XDP program for WAN interfaces - redirect incoming packets to userspace
-
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 
-// XDP socket map - one per queue
+#define FAKE_ETHERTYPE_88B5 0xB588
+#define FAKE_ETHERTYPE_88B6 0xB688
+#define FAKE_ETHERTYPE_9000 0x0090
+
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
     __uint(max_entries, 8);
@@ -14,7 +14,6 @@ struct {
     __type(value, int);
 } wan_xsks_map SEC(".maps");
 
-// Stats for debugging
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 4);
@@ -22,7 +21,6 @@ struct {
     __type(value, __u64);
 } wan_stats_map SEC(".maps");
 
-// Stats indices
 #define STAT_TOTAL      0
 #define STAT_NON_IP     1
 #define STAT_REDIRECT   2
@@ -43,23 +41,19 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
     inc_stat(STAT_TOTAL);
 
-    // Parse Ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // Only handle IPv4
-    if (eth->h_proto != __constant_htons(ETH_P_IP)) {
+    __u16 proto = eth->h_proto;
+    if (proto != __constant_htons(ETH_P_IP) &&
+        proto != FAKE_ETHERTYPE_88B5 &&
+        proto != FAKE_ETHERTYPE_88B6 &&
+        proto != FAKE_ETHERTYPE_9000) {
         inc_stat(STAT_NON_IP);
         return XDP_PASS;
     }
 
-    // Verify IP header
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end)
-        return XDP_PASS;
-
-    // Redirect to userspace via AF_XDP
     int queue_id = ctx->rx_queue_index;
     int ret = bpf_redirect_map(&wan_xsks_map, queue_id, XDP_PASS);
 
