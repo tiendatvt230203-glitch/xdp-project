@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "../inc/forwarder.h"
 #include "../inc/packet_crypto.h"
 #include <signal.h>
@@ -6,6 +7,7 @@
 #include <netinet/ip.h>
 #include <net/ethernet.h>
 #include <sched.h>
+#include <unistd.h>
 
 #define MAX_TOTAL_QUEUES 256
 
@@ -236,16 +238,33 @@ static void *worker_thread(void *arg)
     struct worker_thread_args *args = (struct worker_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
 
+    if (args->queue_count == 0) {
+        fprintf(stderr, "Thread %d: no queues assigned\n", args->thread_id);
+        return NULL;
+    }
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(args->thread_id % sysconf(_SC_NPROCESSORS_ONLN), &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 
     struct pollfd *fds = malloc(sizeof(struct pollfd) * args->queue_count);
+    if (!fds) {
+        fprintf(stderr, "Thread %d: malloc failed\n", args->thread_id);
+        return NULL;
+    }
+
     for (int i = 0; i < args->queue_count; i++) {
+        if (!args->queues[i].queue || !args->queues[i].queue->xsk) {
+            fprintf(stderr, "Thread %d: invalid queue %d\n", args->thread_id, i);
+            free(fds);
+            return NULL;
+        }
         fds[i].fd = xsk_socket__fd(args->queues[i].queue->xsk);
         fds[i].events = POLLIN;
     }
+
+    printf("Thread %d started with %d queues\n", args->thread_id, args->queue_count);
 
     while (running) {
         int has_data = 0;
@@ -253,13 +272,17 @@ static void *worker_thread(void *arg)
         for (int i = 0; i < args->queue_count; i++) {
             struct queue_info *qinfo = &args->queues[i];
 
+            if (!qinfo->queue || !qinfo->queue->xsk)
+                continue;
+
             if (qinfo->is_wan) {
                 process_wan_queue(fwd, qinfo);
             } else {
                 process_local_queue(fwd, qinfo);
             }
 
-            if (xsk_ring_cons__peek(&qinfo->queue->rx, 1, NULL) > 0)
+            uint32_t idx;
+            if (xsk_ring_cons__peek(&qinfo->queue->rx, 1, &idx) > 0)
                 has_data = 1;
         }
 
@@ -328,9 +351,23 @@ void forwarder_cleanup(struct forwarder *fwd)
 void forwarder_run(struct forwarder *fwd)
 {
     int num_threads = fwd->cfg->num_threads;
+
+    if (num_threads <= 0) {
+        fprintf(stderr, "Invalid num_threads: %d\n", num_threads);
+        return;
+    }
+
     pthread_t *threads = malloc(sizeof(pthread_t) * num_threads);
     struct worker_thread_args *thread_args = malloc(sizeof(struct worker_thread_args) * num_threads);
     struct queue_info *all_queues = malloc(sizeof(struct queue_info) * MAX_TOTAL_QUEUES);
+
+    if (!threads || !thread_args || !all_queues) {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(threads);
+        free(thread_args);
+        free(all_queues);
+        return;
+    }
 
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
@@ -339,7 +376,12 @@ void forwarder_run(struct forwarder *fwd)
 
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
-        for (int q = 0; q < local->queue_count; q++) {
+        printf("LOCAL %s: %d queues\n", local->ifname, local->queue_count);
+        for (int q = 0; q < local->queue_count && total_queues < MAX_TOTAL_QUEUES; q++) {
+            if (!local->queues[q].xsk) {
+                fprintf(stderr, "LOCAL %s queue %d: xsk is NULL\n", local->ifname, q);
+                continue;
+            }
             all_queues[total_queues].iface = local;
             all_queues[total_queues].queue = &local->queues[q];
             all_queues[total_queues].iface_idx = i;
@@ -351,7 +393,12 @@ void forwarder_run(struct forwarder *fwd)
 
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
-        for (int q = 0; q < wan->queue_count; q++) {
+        printf("WAN %s: %d queues\n", wan->ifname, wan->queue_count);
+        for (int q = 0; q < wan->queue_count && total_queues < MAX_TOTAL_QUEUES; q++) {
+            if (!wan->queues[q].xsk) {
+                fprintf(stderr, "WAN %s queue %d: xsk is NULL\n", wan->ifname, q);
+                continue;
+            }
             all_queues[total_queues].iface = wan;
             all_queues[total_queues].queue = &wan->queues[q];
             all_queues[total_queues].iface_idx = i;
@@ -361,30 +408,53 @@ void forwarder_run(struct forwarder *fwd)
         }
     }
 
-    printf("Total queues: %d, Threads: %d\n", total_queues, num_threads);
+    printf("Total valid queues: %d, Threads: %d\n", total_queues, num_threads);
 
-    for (int t = 0; t < num_threads; t++) {
+    if (total_queues == 0) {
+        fprintf(stderr, "No valid queues found\n");
+        free(threads);
+        free(thread_args);
+        free(all_queues);
+        return;
+    }
+
+    int actual_threads = num_threads;
+    if (actual_threads > total_queues)
+        actual_threads = total_queues;
+
+    for (int t = 0; t < actual_threads; t++) {
         thread_args[t].fwd = fwd;
         thread_args[t].thread_id = t;
         thread_args[t].queues = malloc(sizeof(struct queue_info) * MAX_TOTAL_QUEUES);
         thread_args[t].queue_count = 0;
+        if (!thread_args[t].queues) {
+            fprintf(stderr, "Failed to allocate queues for thread %d\n", t);
+            for (int j = 0; j < t; j++)
+                free(thread_args[j].queues);
+            free(threads);
+            free(thread_args);
+            free(all_queues);
+            return;
+        }
     }
 
     for (int q = 0; q < total_queues; q++) {
-        int t = q % num_threads;
+        int t = q % actual_threads;
         thread_args[t].queues[thread_args[t].queue_count++] = all_queues[q];
     }
 
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < actual_threads; t++) {
         printf("Thread %d: %d queues\n", t, thread_args[t].queue_count);
-        pthread_create(&threads[t], NULL, worker_thread, &thread_args[t]);
+        if (pthread_create(&threads[t], NULL, worker_thread, &thread_args[t]) != 0) {
+            fprintf(stderr, "Failed to create thread %d\n", t);
+        }
     }
 
     while (running) {
         sleep(1);
     }
 
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < actual_threads; t++) {
         pthread_join(threads[t], NULL);
         free(thread_args[t].queues);
     }
