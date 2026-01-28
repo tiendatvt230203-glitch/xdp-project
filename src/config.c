@@ -296,8 +296,7 @@ int config_validate(struct app_config *cfg)
         return -1;
     }
     if (cfg->num_threads <= 0) {
-        fprintf(stderr, "[GLOBAL] num_threads not specified or invalid\n");
-        return -1;
+        cfg->num_threads = 4;
     }
 
     for (int i = 0; i < cfg->local_count; i++) {

@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "../inc/forwarder.h"
 #include "../inc/packet_crypto.h"
 #include <signal.h>
@@ -6,10 +5,6 @@
 #include <pthread.h>
 #include <netinet/ip.h>
 #include <net/ethernet.h>
-#include <sched.h>
-#include <unistd.h>
-
-#define MAX_TOTAL_QUEUES 256
 
 static volatile int running = 1;
 static pthread_mutex_t wan_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -17,19 +12,14 @@ static pthread_mutex_t wan_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct packet_crypto_ctx crypto_ctx;
 static int crypto_enabled = 0;
 
-struct queue_info {
-    struct xsk_interface *iface;
-    struct xsk_queue *queue;
-    int iface_idx;
-    int queue_idx;
-    int is_wan;
+struct local_thread_args {
+    struct forwarder *fwd;
+    int local_idx;
 };
 
-struct worker_thread_args {
+struct wan_thread_args {
     struct forwarder *fwd;
-    int thread_id;
-    struct queue_info *queues;
-    int queue_count;
+    int wan_idx;
 };
 
 static int encrypt_packet(void *pkt_data, uint32_t *pkt_len)
@@ -93,205 +83,107 @@ static struct xsk_interface *get_wan_locked(struct forwarder *fwd, uint32_t pkt_
     return wan;
 }
 
-static int recv_from_queue(struct xsk_queue *queue, struct xsk_interface *iface,
-                           void **pkt_ptrs, uint32_t *pkt_lens, uint64_t *addrs,
-                           int max_pkts, int queue_idx)
+static void *local_rx_thread(void *arg)
 {
-    uint32_t idx_rx = 0;
-    int rcvd = xsk_ring_cons__peek(&queue->rx, max_pkts, &idx_rx);
-    if (rcvd == 0)
-        return 0;
-
-    for (int j = 0; j < rcvd; j++) {
-        const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
-        uint64_t encoded = ((uint64_t)queue_idx << 56) | (desc->addr & 0x00FFFFFFFFFFFFFF);
-        addrs[j] = encoded;
-        pkt_ptrs[j] = (uint8_t *)queue->bufs + desc->addr;
-        pkt_lens[j] = desc->len;
-    }
-
-    xsk_ring_cons__release(&queue->rx, rcvd);
-    return rcvd;
-}
-
-static void release_to_queue(struct xsk_queue *queue, uint64_t addr, uint32_t batch_size)
-{
-    uint64_t real_addr = addr & 0x00FFFFFFFFFFFFFF;
-    uint32_t idx_fill;
-
-    int ret = xsk_ring_prod__reserve(&queue->fill, 1, &idx_fill);
-    if (ret != 1) {
-        uint32_t comp_idx;
-        int comp = xsk_ring_cons__peek(&queue->comp, batch_size, &comp_idx);
-        if (comp > 0)
-            xsk_ring_cons__release(&queue->comp, comp);
-
-        ret = xsk_ring_prod__reserve(&queue->fill, 1, &idx_fill);
-        if (ret != 1)
-            return;
-    }
-
-    *xsk_ring_prod__fill_addr(&queue->fill, idx_fill) = real_addr;
-    xsk_ring_prod__submit(&queue->fill, 1);
-}
-
-static void process_local_queue(struct forwarder *fwd, struct queue_info *qinfo)
-{
-    struct xsk_interface *local = qinfo->iface;
-    struct xsk_queue *queue = qinfo->queue;
+    struct local_thread_args *args = (struct local_thread_args *)arg;
+    struct forwarder *fwd = args->fwd;
+    int local_idx = args->local_idx;
+    struct xsk_interface *local = &fwd->locals[local_idx];
     int batch_size = local->batch_size;
 
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
 
-    int rcvd = recv_from_queue(queue, local, pkt_ptrs, pkt_lens, addrs, batch_size, qinfo->queue_idx);
-    if (rcvd <= 0)
-        return;
+    while (running) {
+        int rcvd = interface_recv(local, pkt_ptrs, pkt_lens, addrs, batch_size);
+        if (rcvd > 0) {
+            int wan_used[MAX_INTERFACES] = {0};
 
-    int wan_used[MAX_INTERFACES] = {0};
+            for (int i = 0; i < rcvd; i++) {
+                if (encrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    continue;
+                }
 
-    for (int i = 0; i < rcvd; i++) {
-        if (encrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-            release_to_queue(queue, addrs[i], batch_size);
-            continue;
+                int wan_idx;
+                struct xsk_interface *wan = get_wan_locked(fwd, pkt_lens[i], &wan_idx);
+
+                if (interface_send_batch(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
+                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
+                    wan_used[wan_idx] = 1;
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                }
+            }
+
+            for (int w = 0; w < fwd->wan_count; w++) {
+                if (wan_used[w])
+                    interface_send_flush(&fwd->wans[w]);
+            }
+
+            interface_recv_release(local, addrs, rcvd);
         }
-
-        int wan_idx;
-        struct xsk_interface *wan = get_wan_locked(fwd, pkt_lens[i], &wan_idx);
-
-        if (interface_send_batch(wan, pkt_ptrs[i], pkt_lens[i]) == 0) {
-            __sync_fetch_and_add(&fwd->local_to_wan, 1);
-            wan_used[wan_idx] = 1;
-        } else {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-        }
-
-        release_to_queue(queue, addrs[i], batch_size);
     }
 
-    for (int w = 0; w < fwd->wan_count; w++) {
-        if (wan_used[w])
-            interface_send_flush(&fwd->wans[w]);
-    }
+    return NULL;
 }
 
-static void process_wan_queue(struct forwarder *fwd, struct queue_info *qinfo)
+static void *wan_rx_thread(void *arg)
 {
-    struct xsk_interface *wan = qinfo->iface;
-    struct xsk_queue *queue = qinfo->queue;
+    struct wan_thread_args *args = (struct wan_thread_args *)arg;
+    struct forwarder *fwd = args->fwd;
+    int wan_idx = args->wan_idx;
+    struct xsk_interface *wan = &fwd->wans[wan_idx];
     int batch_size = wan->batch_size;
 
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
 
-    int rcvd = recv_from_queue(queue, wan, pkt_ptrs, pkt_lens, addrs, batch_size, qinfo->queue_idx);
-    if (rcvd <= 0)
-        return;
-
-    int local_used[MAX_INTERFACES] = {0};
-
-    for (int i = 0; i < rcvd; i++) {
-        if (decrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-            release_to_queue(queue, addrs[i], batch_size);
-            continue;
-        }
-
-        uint32_t dest_ip = get_dest_ip(pkt_ptrs[i], pkt_lens[i]);
-        if (dest_ip == 0) {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-            release_to_queue(queue, addrs[i], batch_size);
-            continue;
-        }
-
-        int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
-        if (local_idx < 0) {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-            release_to_queue(queue, addrs[i], batch_size);
-            continue;
-        }
-
-        struct xsk_interface *local = &fwd->locals[local_idx];
-        struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
-
-        if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i], qinfo->iface_idx) == 0) {
-            __sync_fetch_and_add(&fwd->wan_to_local, 1);
-            local_used[local_idx] = 1;
-        } else {
-            __sync_fetch_and_add(&fwd->total_dropped, 1);
-        }
-
-        release_to_queue(queue, addrs[i], batch_size);
-    }
-
-    for (int l = 0; l < fwd->local_count; l++) {
-        if (local_used[l])
-            interface_send_to_local_flush(&fwd->locals[l], qinfo->iface_idx);
-    }
-}
-
-static void *worker_thread(void *arg)
-{
-    struct worker_thread_args *args = (struct worker_thread_args *)arg;
-    struct forwarder *fwd = args->fwd;
-
-    if (args->queue_count == 0) {
-        fprintf(stderr, "Thread %d: no queues assigned\n", args->thread_id);
-        return NULL;
-    }
-
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(args->thread_id % sysconf(_SC_NPROCESSORS_ONLN), &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-
-    struct pollfd *fds = malloc(sizeof(struct pollfd) * args->queue_count);
-    if (!fds) {
-        fprintf(stderr, "Thread %d: malloc failed\n", args->thread_id);
-        return NULL;
-    }
-
-    for (int i = 0; i < args->queue_count; i++) {
-        if (!args->queues[i].queue || !args->queues[i].queue->xsk) {
-            fprintf(stderr, "Thread %d: invalid queue %d\n", args->thread_id, i);
-            free(fds);
-            return NULL;
-        }
-        fds[i].fd = xsk_socket__fd(args->queues[i].queue->xsk);
-        fds[i].events = POLLIN;
-    }
-
-    printf("Thread %d started with %d queues\n", args->thread_id, args->queue_count);
-
     while (running) {
-        int has_data = 0;
+        int rcvd = interface_recv(wan, pkt_ptrs, pkt_lens, addrs, batch_size);
+        if (rcvd > 0) {
+            int local_used[MAX_INTERFACES] = {0};
 
-        for (int i = 0; i < args->queue_count; i++) {
-            struct queue_info *qinfo = &args->queues[i];
+            for (int i = 0; i < rcvd; i++) {
+                if (decrypt_packet(pkt_ptrs[i], &pkt_lens[i]) != 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    continue;
+                }
 
-            if (!qinfo->queue || !qinfo->queue->xsk)
-                continue;
+                uint32_t dest_ip = get_dest_ip(pkt_ptrs[i], pkt_lens[i]);
+                if (dest_ip == 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    continue;
+                }
 
-            if (qinfo->is_wan) {
-                process_wan_queue(fwd, qinfo);
-            } else {
-                process_local_queue(fwd, qinfo);
+                int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
+                if (local_idx < 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    continue;
+                }
+
+                struct xsk_interface *local = &fwd->locals[local_idx];
+                struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
+
+                if (interface_send_to_local_batch(local, local_cfg, pkt_ptrs[i], pkt_lens[i], wan_idx) == 0) {
+                    __sync_fetch_and_add(&fwd->wan_to_local, 1);
+                    local_used[local_idx] = 1;
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                }
             }
 
-            uint32_t idx;
-            if (xsk_ring_cons__peek(&qinfo->queue->rx, 1, &idx) > 0)
-                has_data = 1;
-        }
+            for (int l = 0; l < fwd->local_count; l++) {
+                if (local_used[l])
+                    interface_send_to_local_flush(&fwd->locals[l], wan_idx);
+            }
 
-        if (!has_data) {
-            poll(fds, args->queue_count, 1);
+            interface_recv_release(wan, addrs, rcvd);
         }
     }
 
-    free(fds);
     return NULL;
 }
 
@@ -350,118 +242,34 @@ void forwarder_cleanup(struct forwarder *fwd)
 
 void forwarder_run(struct forwarder *fwd)
 {
-    int num_threads = fwd->cfg->num_threads;
-
-    if (num_threads <= 0) {
-        fprintf(stderr, "Invalid num_threads: %d\n", num_threads);
-        return;
-    }
-
-    pthread_t *threads = malloc(sizeof(pthread_t) * num_threads);
-    struct worker_thread_args *thread_args = malloc(sizeof(struct worker_thread_args) * num_threads);
-    struct queue_info *all_queues = malloc(sizeof(struct queue_info) * MAX_TOTAL_QUEUES);
-
-    if (!threads || !thread_args || !all_queues) {
-        fprintf(stderr, "Memory allocation failed\n");
-        free(threads);
-        free(thread_args);
-        free(all_queues);
-        return;
-    }
+    pthread_t local_threads[MAX_INTERFACES];
+    pthread_t wan_threads[MAX_INTERFACES];
+    struct local_thread_args local_args[MAX_INTERFACES];
+    struct wan_thread_args wan_args[MAX_INTERFACES];
 
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
 
-    int total_queues = 0;
-
     for (int i = 0; i < fwd->local_count; i++) {
-        struct xsk_interface *local = &fwd->locals[i];
-        printf("LOCAL %s: %d queues\n", local->ifname, local->queue_count);
-        for (int q = 0; q < local->queue_count && total_queues < MAX_TOTAL_QUEUES; q++) {
-            if (!local->queues[q].xsk) {
-                fprintf(stderr, "LOCAL %s queue %d: xsk is NULL\n", local->ifname, q);
-                continue;
-            }
-            all_queues[total_queues].iface = local;
-            all_queues[total_queues].queue = &local->queues[q];
-            all_queues[total_queues].iface_idx = i;
-            all_queues[total_queues].queue_idx = q;
-            all_queues[total_queues].is_wan = 0;
-            total_queues++;
-        }
+        local_args[i].fwd = fwd;
+        local_args[i].local_idx = i;
+        pthread_create(&local_threads[i], NULL, local_rx_thread, &local_args[i]);
     }
 
     for (int i = 0; i < fwd->wan_count; i++) {
-        struct xsk_interface *wan = &fwd->wans[i];
-        printf("WAN %s: %d queues\n", wan->ifname, wan->queue_count);
-        for (int q = 0; q < wan->queue_count && total_queues < MAX_TOTAL_QUEUES; q++) {
-            if (!wan->queues[q].xsk) {
-                fprintf(stderr, "WAN %s queue %d: xsk is NULL\n", wan->ifname, q);
-                continue;
-            }
-            all_queues[total_queues].iface = wan;
-            all_queues[total_queues].queue = &wan->queues[q];
-            all_queues[total_queues].iface_idx = i;
-            all_queues[total_queues].queue_idx = q;
-            all_queues[total_queues].is_wan = 1;
-            total_queues++;
-        }
-    }
-
-    printf("Total valid queues: %d, Threads: %d\n", total_queues, num_threads);
-
-    if (total_queues == 0) {
-        fprintf(stderr, "No valid queues found\n");
-        free(threads);
-        free(thread_args);
-        free(all_queues);
-        return;
-    }
-
-    int actual_threads = num_threads;
-    if (actual_threads > total_queues)
-        actual_threads = total_queues;
-
-    for (int t = 0; t < actual_threads; t++) {
-        thread_args[t].fwd = fwd;
-        thread_args[t].thread_id = t;
-        thread_args[t].queues = malloc(sizeof(struct queue_info) * MAX_TOTAL_QUEUES);
-        thread_args[t].queue_count = 0;
-        if (!thread_args[t].queues) {
-            fprintf(stderr, "Failed to allocate queues for thread %d\n", t);
-            for (int j = 0; j < t; j++)
-                free(thread_args[j].queues);
-            free(threads);
-            free(thread_args);
-            free(all_queues);
-            return;
-        }
-    }
-
-    for (int q = 0; q < total_queues; q++) {
-        int t = q % actual_threads;
-        thread_args[t].queues[thread_args[t].queue_count++] = all_queues[q];
-    }
-
-    for (int t = 0; t < actual_threads; t++) {
-        printf("Thread %d: %d queues\n", t, thread_args[t].queue_count);
-        if (pthread_create(&threads[t], NULL, worker_thread, &thread_args[t]) != 0) {
-            fprintf(stderr, "Failed to create thread %d\n", t);
-        }
+        wan_args[i].fwd = fwd;
+        wan_args[i].wan_idx = i;
+        pthread_create(&wan_threads[i], NULL, wan_rx_thread, &wan_args[i]);
     }
 
     while (running) {
         sleep(1);
     }
 
-    for (int t = 0; t < actual_threads; t++) {
-        pthread_join(threads[t], NULL);
-        free(thread_args[t].queues);
-    }
-
-    free(threads);
-    free(thread_args);
-    free(all_queues);
+    for (int i = 0; i < fwd->local_count; i++)
+        pthread_join(local_threads[i], NULL);
+    for (int i = 0; i < fwd->wan_count; i++)
+        pthread_join(wan_threads[i], NULL);
 }
 
 void forwarder_print_stats(struct forwarder *fwd)
