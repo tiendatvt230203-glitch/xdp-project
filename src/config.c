@@ -118,9 +118,6 @@ int config_load(struct app_config *cfg, const char *filename)
     memset(cfg, 0, sizeof(*cfg));
     strncpy(cfg->bpf_file, "bpf/xdp_redirect.o", sizeof(cfg->bpf_file) - 1);
 
-    cfg->global_frame_size = DEFAULT_FRAME_SIZE;
-    cfg->global_batch_size = DEFAULT_BATCH_SIZE;
-
     fp = fopen(filename, "r");
     if (!fp) {
         perror("fopen config");
@@ -179,6 +176,8 @@ int config_load(struct app_config *cfg, const char *filename)
                 cfg->global_frame_size = atoi(value);
             } else if (strcmp(key, "batch_size") == 0) {
                 cfg->global_batch_size = atoi(value);
+            } else if (strcmp(key, "num_threads") == 0) {
+                cfg->num_threads = atoi(value);
             }
             break;
 
@@ -288,6 +287,19 @@ int config_load(struct app_config *cfg, const char *filename)
 
 int config_validate(struct app_config *cfg)
 {
+    if (cfg->global_frame_size == 0) {
+        fprintf(stderr, "[GLOBAL] frame_size not specified\n");
+        return -1;
+    }
+    if (cfg->global_batch_size == 0) {
+        fprintf(stderr, "[GLOBAL] batch_size not specified\n");
+        return -1;
+    }
+    if (cfg->num_threads <= 0) {
+        fprintf(stderr, "[GLOBAL] num_threads not specified or invalid\n");
+        return -1;
+    }
+
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
 
@@ -364,8 +376,9 @@ void config_print(struct app_config *cfg)
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
     printf("║ [GLOBAL]                                                     ║\n");
-    printf("║   frame_size: %-48d ║\n", cfg->global_frame_size);
-    printf("║   batch_size: %-48d ║\n", cfg->global_batch_size);
+    printf("║   frame_size:  %-47d ║\n", cfg->global_frame_size);
+    printf("║   batch_size:  %-47d ║\n", cfg->global_batch_size);
+    printf("║   num_threads: %-47d ║\n", cfg->num_threads);
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 

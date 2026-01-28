@@ -8,12 +8,7 @@
 #define MAC_LEN 6
 #define AES_KEY_LEN 16
 #define AES_IV_LEN 16
-
-#define DEFAULT_FRAME_SIZE  4096
-#define DEFAULT_BATCH_SIZE  256
-#define DEFAULT_RING_SIZE   4096
-#define DEFAULT_UMEM_MB     64
-#define MAX_BATCH_SIZE      1024
+#define MAX_BATCH_SIZE 1024
 
 struct local_config {
     char ifname[IF_NAMESIZE];
@@ -42,6 +37,7 @@ struct wan_config {
 struct app_config {
     uint32_t global_frame_size;
     uint32_t global_batch_size;
+    int num_threads;
 
     struct local_config locals[MAX_INTERFACES];
     int local_count;

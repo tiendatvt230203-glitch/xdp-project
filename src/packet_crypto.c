@@ -6,7 +6,7 @@ static uint8_t g_key[AES128_KEY_SIZE];
 static uint8_t g_base_iv[AES128_IV_SIZE];
 static volatile int g_initialized = 0;
 
-static uint16_t g_fake_ethertype = DEFAULT_FAKE_ETHERTYPE;
+static uint16_t g_fake_ethertype = 0;
 
 static __thread EVP_CIPHER_CTX *tls_ctx = NULL;
 static __thread int tls_cipher_ready = 0;

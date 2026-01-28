@@ -12,7 +12,6 @@
 
 #define ETH_HEADER_SIZE       14
 #define CRYPTO_NONCE_SIZE     8
-#define DEFAULT_FAKE_ETHERTYPE  0x88B5
 #define ORIG_ETHERTYPE_SIZE   2
 
 struct packet_crypto_ctx {
