@@ -6,21 +6,18 @@
 #include "forwarder.h"
 
 static int libbpf_print_silent(enum libbpf_print_level level,
-                               const char *format, va_list args)
-{
+                               const char *format, va_list args) {
     (void)level;
     (void)format;
     (void)args;
     return 0;
 }
 
-static void print_usage(const char *prog)
-{
+static void print_usage(const char *prog) {
     printf("Usage: %s [config_file]\n", prog);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     struct app_config cfg;
     struct forwarder fwd;
     const char *config_file = "config.cfg";

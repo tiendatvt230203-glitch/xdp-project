@@ -19,7 +19,7 @@
 #include <xdp/xsk.h>
 #include <errno.h>
 
-#define MAX_QUEUES      64
+#define MAX_QUEUES      256
 
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1U << 1)

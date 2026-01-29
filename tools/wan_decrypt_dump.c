@@ -69,8 +69,12 @@ int main(int argc, char **argv)
             fprintf(stderr, "Failed to init crypto\n");
             return 1;
         }
-        packet_crypto_set_fake_ethertype(cfg.fake_ethertype);
-        printf("Crypto: ENABLED\n");
+        if (cfg.fake_ethertype != 0) {
+            packet_crypto_set_fake_ethertype(&crypto_ctx, cfg.fake_ethertype);
+            printf("Crypto: ENABLED (fake_ethertype=0x%04X)\n", cfg.fake_ethertype);
+        } else {
+            printf("Crypto: ENABLED (zero overhead)\n");
+        }
     } else {
         printf("Crypto: DISABLED\n");
     }
@@ -114,10 +118,9 @@ int main(int argc, char **argv)
                     print_packet(pkt_ptrs[i], pkt_lens[i], pkt_count, "ENCRYPTED", cfg.wans[w].ifname);
 
                     if (cfg.crypto_enabled) {
-                        int new_len = packet_decrypt(&crypto_ctx, pkt_ptrs[i], pkt_lens[i]);
-                        if (new_len > 0) {
-                            pkt_lens[i] = new_len;
-                            printf("\n>>> AFTER DECRYPT:\n");
+                        // Zero overhead decryption - packet size unchanged
+                        if (packet_decrypt(&crypto_ctx, pkt_ptrs[i], pkt_lens[i]) == 0) {
+                            printf("\n>>> AFTER DECRYPT (size unchanged):\n");
                             print_packet(pkt_ptrs[i], pkt_lens[i], pkt_count, "PLAIN", cfg.wans[w].ifname);
                         } else {
                             printf(">>> DECRYPT FAILED\n");

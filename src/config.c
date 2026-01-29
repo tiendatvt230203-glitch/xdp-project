@@ -5,8 +5,7 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 
-int parse_mac(const char *str, uint8_t *mac)
-{
+int parse_mac(const char *str, uint8_t *mac) {
     int values[6];
     if (sscanf(str, "%x:%x:%x:%x:%x:%x",
                &values[0], &values[1], &values[2],
@@ -19,8 +18,7 @@ int parse_mac(const char *str, uint8_t *mac)
     return 0;
 }
 
-static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network)
-{
+static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network) {
     char ip_str[32];
     int prefix_len;
 
@@ -47,8 +45,7 @@ static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint3
     return 0;
 }
 
-static char *trim(char *str)
-{
+static char *trim(char *str) {
     while (isspace((unsigned char)*str)) str++;
     if (*str == 0) return str;
     char *end = str + strlen(str) - 1;
@@ -57,23 +54,20 @@ static char *trim(char *str)
     return str;
 }
 
-static const char *ip_to_str(uint32_t ip, char *buf, size_t len)
-{
+static const char *ip_to_str(uint32_t ip, char *buf, size_t len) {
     struct in_addr addr;
     addr.s_addr = ip;
     inet_ntop(AF_INET, &addr, buf, len);
     return buf;
 }
 
-static const char *mac_to_str(const uint8_t *mac, char *buf, size_t len)
-{
+static const char *mac_to_str(const uint8_t *mac, char *buf, size_t len) {
     snprintf(buf, len, "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return buf;
 }
 
-static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len)
-{
+static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len) {
     int len = strlen(str);
     if (len != expected_len * 2) {
         return -1;
@@ -89,8 +83,7 @@ static int parse_hex_bytes(const char *str, uint8_t *out, int expected_len)
     return 0;
 }
 
-static const char *bytes_to_hex(const uint8_t *data, int len, char *buf, size_t buflen)
-{
+static const char *bytes_to_hex(const uint8_t *data, int len, char *buf, size_t buflen) {
     if (buflen < (size_t)(len * 2 + 1)) {
         buf[0] = '\0';
         return buf;
@@ -109,8 +102,7 @@ enum section_type {
     SECTION_CRYPTO
 };
 
-int config_load(struct app_config *cfg, const char *filename)
-{
+int config_load(struct app_config *cfg, const char *filename) {
     FILE *fp;
     char line[512];
     enum section_type current_section = SECTION_NONE;
@@ -136,7 +128,9 @@ int config_load(struct app_config *cfg, const char *filename)
         if (trimmed[0] == '[') {
             if (strcmp(trimmed, "[GLOBAL]") == 0) {
                 current_section = SECTION_GLOBAL;
-            } else if (strcmp(trimmed, "[LOCAL]") == 0) {
+            } 
+            
+            else if (strcmp(trimmed, "[LOCAL]") == 0) {
                 current_section = SECTION_LOCAL;
                 if (cfg->local_count >= MAX_INTERFACES) {
                     fprintf(stderr, "Too many LOCAL interfaces\n");
@@ -148,7 +142,9 @@ int config_load(struct app_config *cfg, const char *filename)
                 current_local->frame_size = cfg->global_frame_size;
                 current_local->batch_size = cfg->global_batch_size;
                 cfg->local_count++;
-            } else if (strcmp(trimmed, "[WAN]") == 0) {
+            } 
+            
+            else if (strcmp(trimmed, "[WAN]") == 0) {
                 current_section = SECTION_WAN;
                 if (cfg->wan_count >= MAX_INTERFACES) {
                     fprintf(stderr, "Too many WAN interfaces\n");
@@ -160,7 +156,9 @@ int config_load(struct app_config *cfg, const char *filename)
                 current_wan->frame_size = cfg->global_frame_size;
                 current_wan->batch_size = cfg->global_batch_size;
                 cfg->wan_count++;
-            } else if (strcmp(trimmed, "[CRYPTO]") == 0) {
+            } 
+            
+            else if (strcmp(trimmed, "[CRYPTO]") == 0) {
                 current_section = SECTION_CRYPTO;
             }
             continue;
@@ -176,8 +174,6 @@ int config_load(struct app_config *cfg, const char *filename)
                 cfg->global_frame_size = atoi(value);
             } else if (strcmp(key, "batch_size") == 0) {
                 cfg->global_batch_size = atoi(value);
-            } else if (strcmp(key, "num_threads") == 0) {
-                cfg->num_threads = atoi(value);
             }
             break;
 
@@ -185,60 +181,89 @@ int config_load(struct app_config *cfg, const char *filename)
             if (!current_local) break;
             if (strcmp(key, "interface") == 0) {
                 strncpy(current_local->ifname, value, IF_NAMESIZE - 1);
-            } else if (strcmp(key, "network") == 0) {
+            } 
+            
+            else if (strcmp(key, "network") == 0) {
                 if (parse_ip_cidr(value, &current_local->ip, &current_local->netmask, &current_local->network) != 0) {
                     fprintf(stderr, "Invalid LOCAL network: %s\n", value);
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "src_mac") == 0) {
+            } 
+            
+            else if (strcmp(key, "src_mac") == 0) {
                 if (parse_mac(value, current_local->src_mac) != 0) {
                     fprintf(stderr, "Invalid LOCAL src_mac: %s\n", value);
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "dst_mac") == 0) {
+            } 
+            
+            else if (strcmp(key, "dst_mac") == 0) {
                 if (parse_mac(value, current_local->dst_mac) != 0) {
                     fprintf(stderr, "Invalid LOCAL dst_mac: %s\n", value);
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "umem_mb") == 0) {
+            } 
+            
+            else if (strcmp(key, "umem_mb") == 0) {
                 current_local->umem_mb = atoi(value);
-            } else if (strcmp(key, "ring_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "ring_size") == 0) {
                 current_local->ring_size = atoi(value);
-            } else if (strcmp(key, "frame_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "frame_size") == 0) {
                 current_local->frame_size = atoi(value);
-            } else if (strcmp(key, "batch_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "batch_size") == 0) {
                 current_local->batch_size = atoi(value);
             }
             break;
 
         case SECTION_WAN:
             if (!current_wan) break;
+
             if (strcmp(key, "interface") == 0) {
                 strncpy(current_wan->ifname, value, IF_NAMESIZE - 1);
-            } else if (strcmp(key, "src_mac") == 0) {
+            } 
+            
+            else if (strcmp(key, "src_mac") == 0) {
                 if (parse_mac(value, current_wan->src_mac) != 0) {
                     fprintf(stderr, "Invalid WAN src_mac: %s\n", value);
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "dst_mac") == 0) {
+            } 
+            
+            else if (strcmp(key, "dst_mac") == 0) {
                 if (parse_mac(value, current_wan->dst_mac) != 0) {
                     fprintf(stderr, "Invalid WAN dst_mac: %s\n", value);
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "window_kb") == 0) {
+            } 
+            
+            else if (strcmp(key, "window_kb") == 0) {
                 current_wan->window_size = atoi(value) * 1024;
-            } else if (strcmp(key, "umem_mb") == 0) {
+            } 
+            
+            else if (strcmp(key, "umem_mb") == 0) {
                 current_wan->umem_mb = atoi(value);
-            } else if (strcmp(key, "ring_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "ring_size") == 0) {
                 current_wan->ring_size = atoi(value);
-            } else if (strcmp(key, "frame_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "frame_size") == 0) {
                 current_wan->frame_size = atoi(value);
-            } else if (strcmp(key, "batch_size") == 0) {
+            } 
+            
+            else if (strcmp(key, "batch_size") == 0) {
                 current_wan->batch_size = atoi(value);
             }
             break;
@@ -246,19 +271,25 @@ int config_load(struct app_config *cfg, const char *filename)
         case SECTION_CRYPTO:
             if (strcmp(key, "enabled") == 0) {
                 cfg->crypto_enabled = atoi(value);
-            } else if (strcmp(key, "key") == 0) {
+            } 
+            
+            else if (strcmp(key, "key") == 0) {
                 if (parse_hex_bytes(value, cfg->crypto_key, AES_KEY_LEN) != 0) {
                     fprintf(stderr, "Invalid CRYPTO key\n");
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "iv") == 0) {
+            } 
+            
+            else if (strcmp(key, "iv") == 0) {
                 if (parse_hex_bytes(value, cfg->crypto_iv, AES_IV_LEN) != 0) {
                     fprintf(stderr, "Invalid CRYPTO iv\n");
                     fclose(fp);
                     return -1;
                 }
-            } else if (strcmp(key, "fake_ethertype") == 0) {
+            } 
+            
+            else if (strcmp(key, "fake_ethertype") == 0) {
                 unsigned int val;
                 if (sscanf(value, "%x", &val) == 1 && val <= 0xFFFF) {
                     cfg->fake_ethertype = (uint16_t)val;
@@ -285,18 +316,15 @@ int config_load(struct app_config *cfg, const char *filename)
     return config_validate(cfg);
 }
 
-int config_validate(struct app_config *cfg)
-{
+int config_validate(struct app_config *cfg) {
     if (cfg->global_frame_size == 0) {
         fprintf(stderr, "[GLOBAL] frame_size not specified\n");
         return -1;
     }
+
     if (cfg->global_batch_size == 0) {
         fprintf(stderr, "[GLOBAL] batch_size not specified\n");
         return -1;
-    }
-    if (cfg->num_threads <= 0) {
-        cfg->num_threads = 4;
     }
 
     for (int i = 0; i < cfg->local_count; i++) {
@@ -330,14 +358,17 @@ int config_validate(struct app_config *cfg)
             fprintf(stderr, "WAN[%d]: interface not specified\n", i);
             return -1;
         }
+
         if (wan->umem_mb == 0) {
             fprintf(stderr, "WAN %s: umem_mb not specified\n", wan->ifname);
             return -1;
         }
+
         if (wan->ring_size == 0) {
             fprintf(stderr, "WAN %s: ring_size not specified\n", wan->ifname);
             return -1;
         }
+
         if (wan->window_size == 0) {
             fprintf(stderr, "WAN %s: window_kb not specified\n", wan->ifname);
             return -1;
@@ -354,8 +385,7 @@ int config_validate(struct app_config *cfg)
     return 0;
 }
 
-int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip)
-{
+int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip) {
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
         if ((dest_ip & local->netmask) == local->network) {
@@ -365,8 +395,7 @@ int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip)
     return -1;
 }
 
-void config_print(struct app_config *cfg)
-{
+void config_print(struct app_config *cfg) {
     char ip_buf[INET_ADDRSTRLEN], ip_buf2[INET_ADDRSTRLEN];
     char mac_buf[32], mac_buf2[32];
 
@@ -375,9 +404,8 @@ void config_print(struct app_config *cfg)
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
     printf("║ [GLOBAL]                                                     ║\n");
-    printf("║   frame_size:  %-47d ║\n", cfg->global_frame_size);
-    printf("║   batch_size:  %-47d ║\n", cfg->global_batch_size);
-    printf("║   num_threads: %-47d ║\n", cfg->num_threads);
+    printf("║   frame_size: %-48d ║\n", cfg->global_frame_size);
+    printf("║   batch_size: %-48d ║\n", cfg->global_batch_size);
 
     printf("╠══════════════════════════════════════════════════════════════╣\n");
 
@@ -404,7 +432,7 @@ void config_print(struct app_config *cfg)
         printf("╟──────────────────────────────────────────────────────────────╢\n");
     }
 
-    printf("║ [CRYPTO] %-53s ║\n", cfg->crypto_enabled ? "ENABLED" : "DISABLED");
+    printf("║ [CRYPTO] %-53s ║\n", cfg->crypto_enabled ? "ENABLED (zero overhead)" : "DISABLED");
     if (cfg->crypto_enabled) {
         char hex_buf[64];
         printf("║   key: %s...                              ║\n", bytes_to_hex(cfg->crypto_key, 8, hex_buf, sizeof(hex_buf)));

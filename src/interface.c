@@ -12,8 +12,7 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
-static int get_rx_queue_count(const char *ifname)
-{
+static int get_rx_queue_count(const char *ifname) {
     struct ethtool_channels channels = {0};
     struct ifreq ifr = {0};
     int fd, ret;
@@ -43,8 +42,7 @@ static int get_rx_queue_count(const char *ifname)
 
 int interface_init_local(struct xsk_interface *iface,
                          const struct local_config *local_cfg,
-                         const char *bpf_file)
-{
+                         const char *bpf_file) {
     int ret;
     struct bpf_program *prog;
     struct bpf_map *map;
@@ -224,8 +222,7 @@ err_queues:
 }
 
 int interface_init_wan(struct xsk_interface *iface,
-                       const struct wan_config *wan_cfg)
-{
+                       const struct wan_config *wan_cfg) {
     int ret;
     uint32_t idx;
 
@@ -290,8 +287,7 @@ int interface_init_wan(struct xsk_interface *iface,
 
 int interface_init_wan_rx(struct xsk_interface *iface,
                           const struct wan_config *wan_cfg,
-                          const char *bpf_file)
-{
+                          const char *bpf_file) {
     int ret;
     struct bpf_object *wan_bpf_obj = NULL;
     struct bpf_program *prog;
@@ -457,8 +453,7 @@ err_queues:
     return -1;
 }
 
-void interface_cleanup(struct xsk_interface *iface)
-{
+void interface_cleanup(struct xsk_interface *iface) {
     pthread_mutex_destroy(&iface->tx_lock);
 
     if (iface->ifindex)
@@ -498,8 +493,7 @@ void interface_cleanup(struct xsk_interface *iface)
 
 int interface_recv(struct xsk_interface *iface,
                    void **pkt_ptrs, uint32_t *pkt_lens,
-                   uint64_t *addrs, int max_pkts)
-{
+                   uint64_t *addrs, int max_pkts) {
     uint32_t idx_rx = 0;
     int total_rcvd = 0;
 
@@ -562,8 +556,7 @@ int interface_recv(struct xsk_interface *iface,
 }
 
 void interface_recv_release(struct xsk_interface *iface,
-                            uint64_t *addrs, int count)
-{
+                            uint64_t *addrs, int count) {
     if (iface->queue_count == 0)
         return;
 
@@ -595,8 +588,7 @@ void interface_recv_release(struct xsk_interface *iface,
 }
 
 int interface_send(struct xsk_interface *iface,
-                   void *pkt_data, uint32_t pkt_len)
-{
+                   void *pkt_data, uint32_t pkt_len) {
     uint32_t idx;
     struct ether_header *eth;
 
@@ -640,8 +632,7 @@ int interface_send(struct xsk_interface *iface,
 
 int interface_send_to_local(struct xsk_interface *iface,
                             const struct local_config *local_cfg,
-                            void *pkt_data, uint32_t pkt_len)
-{
+                            void *pkt_data, uint32_t pkt_len) {
     uint32_t idx;
     struct ether_header *eth;
 
@@ -689,14 +680,12 @@ int interface_send_to_local(struct xsk_interface *iface,
     return 0;
 }
 
-void interface_print_stats(struct xsk_interface *iface)
-{
+void interface_print_stats(struct xsk_interface *iface) {
     (void)iface;
 }
 
 int interface_send_batch(struct xsk_interface *iface,
-                         void *pkt_data, uint32_t pkt_len)
-{
+                         void *pkt_data, uint32_t pkt_len) {
     uint32_t idx;
     struct ether_header *eth;
     int ret = 0;
@@ -763,8 +752,7 @@ unlock:
     return ret;
 }
 
-void interface_send_flush(struct xsk_interface *iface)
-{
+void interface_send_flush(struct xsk_interface *iface) {
     pthread_mutex_lock(&iface->tx_lock);
     if (iface->pending_tx_count > 0) {
         sendto(xsk_socket__fd(iface->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
@@ -776,8 +764,7 @@ void interface_send_flush(struct xsk_interface *iface)
 int interface_send_to_local_batch(struct xsk_interface *iface,
                                   const struct local_config *local_cfg,
                                   void *pkt_data, uint32_t pkt_len,
-                                  int tx_queue)
-{
+                                  int tx_queue) {
     uint32_t idx;
     struct ether_header *eth;
 
@@ -844,8 +831,7 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     return 0;
 }
 
-void interface_send_to_local_flush(struct xsk_interface *iface, int tx_queue)
-{
+void interface_send_to_local_flush(struct xsk_interface *iface, int tx_queue) {
     if (iface->queue_count == 0)
         return;
 
