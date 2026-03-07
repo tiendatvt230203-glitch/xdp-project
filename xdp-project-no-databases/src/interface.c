@@ -1,6 +1,5 @@
 #include "../inc/interface.h"
 #include <poll.h>
-#include <sched.h>
 #include <net/ethernet.h>
 #include <unistd.h>
 #include <errno.h>
@@ -76,6 +75,7 @@ int interface_set_queue_count(const char *ifname, int desired_count) {
         int target = desired_count > max_combined ? max_combined : desired_count;
         if (target == (int)channels.combined_count) {
             close(fd);
+            printf("[QUEUE] %s: already %d combined channels\n", ifname, target);
             return target;
         }
         channels.cmd = ETHTOOL_SCHANNELS;
@@ -90,6 +90,7 @@ int interface_set_queue_count(const char *ifname, int desired_count) {
                     ifname, target, max_combined, current, strerror(errno));
             return current > 0 ? current : 1;
         }
+        printf("[QUEUE] %s: set %d combined channels (max=%d)\n", ifname, target, max_combined);
         return target;
     } 
     
@@ -97,6 +98,7 @@ int interface_set_queue_count(const char *ifname, int desired_count) {
         int target = desired_count > max_rx ? max_rx : desired_count;
         if (target == (int)channels.rx_count) {
             close(fd);
+            printf("[QUEUE] %s: already %d rx channels\n", ifname, target);
             return target;
         }
         channels.cmd = ETHTOOL_SCHANNELS;
@@ -109,6 +111,7 @@ int interface_set_queue_count(const char *ifname, int desired_count) {
                     ifname, target, max_rx, strerror(errno));
             return current > 0 ? current : 1;
         }
+        printf("[QUEUE] %s: set %d rx channels (max=%d)\n", ifname, target, max_rx);
         return target;
     }
 
@@ -431,6 +434,12 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         uint16_t fake6_net = htons(fake_ethertype_ipv6);
         bpf_map_update_elem(cfg_fd, &key0, &fake4_net, 0);
         bpf_map_update_elem(cfg_fd, &key1, &fake6_net, 0);
+        if (fake_ethertype_ipv4)
+            printf("WAN %s: fake_ethertype_ipv4 = 0x%04X (BPF map[0])\n",
+                   wan_cfg->ifname, fake_ethertype_ipv4);
+        if (fake_ethertype_ipv6)
+            printf("WAN %s: fake_ethertype_ipv6 = 0x%04X (BPF map[1])\n",
+                   wan_cfg->ifname, fake_ethertype_ipv6);
     }
 
     size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
@@ -882,11 +891,11 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
 
-        for (int retry = 0; retry < 8; retry++) {
+        for (int retry = 0; retry < 3; retry++) {
             reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
             if (reserved >= 1)
                 break;
-            for (volatile int i = 0; i < 400; i++);
+            for (volatile int i = 0; i < 100; i++);
             completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
             if (completed > 0)
                 xsk_ring_cons__release(&queue->comp, completed);
@@ -915,7 +924,7 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    if (queue->pending_tx_count >= 16) {
+    if (queue->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
     }
@@ -1027,11 +1036,11 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
 
-        for (int retry = 0; retry < 8; retry++) {
+        for (int retry = 0; retry < 3; retry++) {
             reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
             if (reserved >= 1)
                 break;
-            for (volatile int i = 0; i < 400; i++);
+            for (volatile int i = 0; i < 100; i++);
             completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
             if (completed > 0)
                 xsk_ring_cons__release(&queue->comp, completed);
@@ -1064,7 +1073,7 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    if (queue->pending_tx_count >= 16) {
+    if (queue->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
     }
@@ -1102,27 +1111,35 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
     pthread_mutex_lock(&queue->tx_lock);
 
     uint32_t comp_idx;
-    int completed;
-    int reserved = 0;
-    unsigned int wait_loops = 0;
+    int completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
+    if (completed > 0)
+        xsk_ring_cons__release(&queue->comp, completed);
 
-    while (1) {
+    int reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+    if (reserved < 1) {
+        if (queue->pending_tx_count > 0) {
+            sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+            queue->pending_tx_count = 0;
+        }
+
         completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
         if (completed > 0)
             xsk_ring_cons__release(&queue->comp, completed);
 
-        reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
-        if (reserved >= 1)
-            break;
-
-        __sync_fetch_and_add(&queue->tx_wait_loops, 1);
-        sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        queue->pending_tx_count = 0;
-        if (wait_loops++ > 50) {
-            usleep(100);  /* give kernel time to drain, reduce CPU spin */
-            wait_loops = 0;
+        for (int retry = 0; retry < 3; retry++) {
+            reserved = xsk_ring_prod__reserve(&queue->tx, 1, &idx);
+            if (reserved >= 1)
+                break;
+            for (volatile int i = 0; i < 100; i++);
+            completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
+            if (completed > 0)
+                xsk_ring_cons__release(&queue->comp, completed);
         }
-        sched_yield();
+
+        if (reserved < 1) {
+            ret = -1;
+            goto unlock;
+        }
     }
 
     {
@@ -1146,14 +1163,14 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
     __sync_fetch_and_add(&iface->tx_packets, 1);
     __sync_fetch_and_add(&iface->tx_bytes, pkt_len);
 
-    if (queue->pending_tx_count >= 4) {
+    if (queue->pending_tx_count >= 64) {
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
     }
 
 unlock:
     pthread_mutex_unlock(&queue->tx_lock);
-    return 0;
+    return ret;
 }
 
 void interface_send_to_local_flush_queue(struct xsk_interface *iface,

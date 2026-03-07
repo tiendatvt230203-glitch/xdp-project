@@ -13,16 +13,6 @@
 #define CRYPTO_MODE_CTR  0
 #define CRYPTO_MODE_GCM  1
 
-#define DEFAULT_FRAME_SIZE      4096
-#define DEFAULT_BATCH_SIZE      1024
-#define DEFAULT_UMEM_MB_LOCAL   2048
-#define DEFAULT_UMEM_MB_WAN     256
-#define DEFAULT_RING_SIZE       262144
-#define DEFAULT_RING_SIZE_WAN   32768
-#define DEFAULT_WINDOW_KB       2048
-#define DEFAULT_QUEUE_COUNT     1
-#define DEFAULT_LOCAL_RATE_LIMIT_MBPS 0
-
 struct local_config {
     char ifname[IF_NAMESIZE];
     uint32_t ip;
@@ -63,17 +53,19 @@ struct app_config {
 
     int crypto_enabled;
     uint8_t crypto_key[AES_KEY_LEN];
+    uint32_t rotate_interval;
     int encrypt_layer;
+    uint16_t fake_ethertype_ipv4;
+    uint16_t fake_ethertype_ipv6;
     uint8_t fake_protocol;
-    uint32_t local_rate_limit_mbps;
     int crypto_mode;
     int nonce_size;
     int aes_bits;
 };
 
+int config_load(struct app_config *cfg, const char *filename);
+void config_print(struct app_config *cfg);
 int parse_mac(const char *str, uint8_t *mac);
-int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network);
-int parse_hex_bytes_pub(const char *str, uint8_t *out, int expected_len);
 int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip);
 int config_validate(struct app_config *cfg);
 

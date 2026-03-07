@@ -2,13 +2,9 @@
 #include "../inc/packet_crypto.h"
 #include "../inc/flow_table.h"
 #include "../inc/fragment.h"
-#include "../inc/config.h"
 #include <signal.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sched.h>
-#include <time.h>
-#include <unistd.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
@@ -27,19 +23,7 @@ struct queue_thread_args {
     int iface_idx;
     int queue_idx;
     int tx_queue_base;
-    int core_id;
-    int wan_worker_index;
 };
-
-static void pin_thread_to_core(int core_id) {
-    if (core_id < 0)
-        return;
-
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-}
 
 static int encrypt_packet(void *pkt_data, uint32_t *pkt_len) {
     if (!crypto_enabled) return 0;
@@ -121,20 +105,6 @@ static int parse_flow(void *pkt_data, uint32_t pkt_len,
     return 0;
 }
 
-static inline uint32_t flow_hash_local_tq(uint32_t src_ip, uint32_t dst_ip,
-                                          uint16_t src_port, uint16_t dst_port,
-                                          uint8_t protocol) {
-    uint32_t h = src_ip ^ dst_ip;
-    h ^= ((uint32_t)src_port << 16) | dst_port;
-    h ^= protocol;
-    h ^= (h >> 16);
-    h *= 0x85ebca6b;
-    h ^= (h >> 13);
-    h *= 0xc2b2ae35;
-    h ^= (h >> 16);
-    return h;
-}
-
 static void *gc_thread(void *arg) {
     (void)arg;
     while (running) {
@@ -147,13 +117,15 @@ static void *gc_thread(void *arg) {
 static void *local_queue_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
-    pin_thread_to_core(args->core_id);
     int local_idx = args->iface_idx;
     int queue_idx = args->queue_idx;
     int tx_base = args->tx_queue_base;
 
     struct xsk_interface *local = &fwd->locals[local_idx];
     int batch_size = local->batch_size;
+
+    printf("[THREAD] LOCAL[%d] queue[%d] (tx_base=%d)\n",
+           local_idx, queue_idx, tx_base);
 
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
@@ -197,8 +169,6 @@ static void *local_queue_thread(void *arg) {
                 frag_need_split(pkt_lens[i])) {
 
                 uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
-                memcpy(pkt, wan->dst_mac, 6);
-                memcpy(pkt + 6, wan->src_mac, 6);
 
                 uint32_t f1_len = 0, f2_len = 0;
                 if (frag_split_and_encrypt(&crypto_ctx,
@@ -209,10 +179,6 @@ static void *local_queue_thread(void *arg) {
                     continue;
                 }
 
-                memcpy(frag1_buf, wan->dst_mac, 6);
-                memcpy(frag1_buf + 6, wan->src_mac, 6);
-                memcpy(frag2_buf, wan->dst_mac, 6);
-                memcpy(frag2_buf + 6, wan->src_mac, 6);
 
                 uint32_t wire_total = f1_len + f2_len;
                 if (wire_total > pkt_lens[i]) {
@@ -271,14 +237,12 @@ static void *local_queue_thread(void *arg) {
         interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
     }
 
-    free(args);
     return NULL;
 }
 
 static void *wan_queue_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
-    pin_thread_to_core(args->core_id);
     int wan_idx = args->iface_idx;
     int queue_idx = args->queue_idx;
     int tx_base = args->tx_queue_base;
@@ -286,26 +250,21 @@ static void *wan_queue_thread(void *arg) {
     struct xsk_interface *wan = &fwd->wans[wan_idx];
     int batch_size = wan->batch_size;
 
+    printf("[THREAD] WAN[%d] queue[%d] (tx_base=%d)\n",
+           wan_idx, queue_idx, tx_base);
+
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
 
-    struct frag_table *frag_tbl = NULL;
-    if (crypto_enabled && crypto_layer == 3) {
-        frag_tbl = calloc(1, sizeof(struct frag_table));
-        if (frag_tbl)
-            frag_table_init(frag_tbl);
+    struct frag_table *frag_tbl = calloc(1, sizeof(struct frag_table));
+    if (frag_tbl) {
+        frag_table_init(frag_tbl);
     }
 
     uint8_t reassemble_buf[4096];
 
     int gc_counter = 0;
-
-    uint64_t rate_bytes_this_sec = 0;
-    double rate_next_reset_sec = 0;
-    uint64_t my_rate_bps = 0;
-    if (fwd->cfg->local_rate_limit_mbps > 0 && fwd->wan_count > 0)
-        my_rate_bps = (fwd->cfg->local_rate_limit_mbps * 1000000ULL / 8) / (uint64_t)fwd->wan_count;
 
     while (running) {
         int rcvd = interface_recv_single_queue(wan, queue_idx,
@@ -313,7 +272,10 @@ static void *wan_queue_thread(void *arg) {
         if (rcvd <= 0)
             continue;
 
-        uint32_t local_used_queues[MAX_INTERFACES] = {0};
+        int local_used[MAX_INTERFACES] = {0};
+        int local_tx_q[MAX_INTERFACES];
+        for (int l = 0; l < fwd->local_count; l++)
+            local_tx_q[l] = tx_base % fwd->locals[l].queue_count;
 
         for (int i = 0; i < rcvd; i++) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
@@ -331,7 +293,7 @@ static void *wan_queue_thread(void *arg) {
 
             if (is_frag) {
                 int dec_len = frag_decrypt_fragment(&crypto_ctx, pkt, pkt_len,
-                                                    &frag_pkt_id, &frag_index);
+                                                     &frag_pkt_id, &frag_index);
                 if (dec_len < 0) {
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                     continue;
@@ -340,18 +302,24 @@ static void *wan_queue_thread(void *arg) {
 
                 uint32_t reasm_len = 0;
                 int ret = frag_try_reassemble(frag_tbl, pkt, pkt_len,
-                                             frag_pkt_id, frag_index,
-                                             reassemble_buf, &reasm_len);
+                                               frag_pkt_id, frag_index,
+                                               reassemble_buf, &reasm_len);
                 if (ret == 0) {
                     continue;
-                } else if (ret == 1) {
+                } 
+                
+                else if (ret == 1) {
                     final_pkt = reassemble_buf;
                     final_len = reasm_len;
-                } else {
+                } 
+                
+                else {
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                     continue;
                 }
-            } else {
+            } 
+            
+            else {
                 if (decrypt_packet(pkt, &pkt_len) != 0) {
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                     continue;
@@ -360,83 +328,36 @@ static void *wan_queue_thread(void *arg) {
                 final_len = pkt_len;
             }
 
-wan_rx_forward:
-    uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
-    if (dest_ip == 0) {
-        __sync_fetch_and_add(&fwd->total_dropped, 1);
-        __sync_fetch_and_add(&fwd->dropped_bad_ip, 1);
-        continue;
-    }
+            uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
+            if (dest_ip == 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                continue;
+            }
 
-    int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
-    if (local_idx < 0) {
-        __sync_fetch_and_add(&fwd->total_dropped, 1);
-        __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
-        continue;
-    }
+            int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
+            if (local_idx < 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                continue;
+            }
 
             struct xsk_interface *local_iface = &fwd->locals[local_idx];
             struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
-            int nq = local_iface->queue_count;
-            if (nq <= 0) nq = 1;
+            int tq = local_tx_q[local_idx];
 
-            int tq;
-            {
-                uint32_t src_ip, dst_ip;
-                uint16_t src_port, dst_port;
-                uint8_t protocol;
-                if (parse_flow(final_pkt, final_len, &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0)
-                    tq = (int)(flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol) % (uint32_t)nq);
-                else
-                    tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
-            }
-
-            int send_ok = 0;
-            for (int retry = 0; retry < 32 && !send_ok; retry++) {
-                if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg,
-                                                        final_pkt, final_len) == 0) {
-                    send_ok = 1;
-                    break;
-                }
-                for (volatile int spin = 0; spin < 200; spin++);
-            }
-
-            if (send_ok) {
+            if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg,
+                                                     final_pkt, final_len) == 0) {
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);
-                if (tq < 32)
-                    local_used_queues[local_idx] |= (1u << tq);
-                if (my_rate_bps > 0) {
-                    struct timespec ts;
-                    clock_gettime(CLOCK_MONOTONIC, &ts);
-                    double now = ts.tv_sec + ts.tv_nsec / 1e9;
-                    if (rate_next_reset_sec == 0)
-                        rate_next_reset_sec = now + 1.0;
-                    if (now >= rate_next_reset_sec) {
-                        rate_bytes_this_sec = 0;
-                        rate_next_reset_sec = now + 1.0;
-                    }
-                    rate_bytes_this_sec += final_len;
-                    if (rate_bytes_this_sec > my_rate_bps) {
-                        double sleep_sec = rate_next_reset_sec - now;
-                        if (sleep_sec > 0 && sleep_sec < 2.0)
-                            usleep((useconds_t)(sleep_sec * 1e6));
-                        rate_bytes_this_sec = final_len;
-                        clock_gettime(CLOCK_MONOTONIC, &ts);
-                        rate_next_reset_sec = ts.tv_sec + ts.tv_nsec / 1e9 + 1.0;
-                    }
-                }
-            } else {
+                local_used[local_idx] = 1;
+            } 
+            
+            else {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_local_tx_fail, 1);
-                if (tq < FORWARDER_MAX_LOCAL_QUEUES)
-                    __sync_fetch_and_add(&fwd->dropped_local_tx_fail_by_queue[tq], 1);
             }
         }
 
         for (int l = 0; l < fwd->local_count; l++) {
-            for (int q = 0; q < fwd->locals[l].queue_count && q < 32; q++)
-                if (local_used_queues[l] & (1u << q))
-                    interface_send_to_local_flush_queue(&fwd->locals[l], q);
+            if (local_used[l])
+                interface_send_to_local_flush_queue(&fwd->locals[l], local_tx_q[l]);
         }
 
         interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
@@ -448,7 +369,6 @@ wan_rx_forward:
     }
 
     if (frag_tbl) free(frag_tbl);
-    free(args);
     return NULL;
 }
 
@@ -460,42 +380,46 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     crypto_layer = cfg->encrypt_layer;
     if (crypto_enabled) {
         packet_crypto_set_aes_bits(cfg->aes_bits);
-        if (packet_crypto_init(&crypto_ctx, cfg->crypto_key) != 0) {
+        if (packet_crypto_init(&crypto_ctx, cfg->crypto_key, cfg->rotate_interval) != 0) {
             fprintf(stderr, "Failed to initialize AES-%d encryption\n", cfg->aes_bits);
             return -1;
         }
         packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
         packet_crypto_set_mode(cfg->crypto_mode);
         packet_crypto_set_nonce_size(cfg->nonce_size);
-        if (crypto_layer == 2 || crypto_layer == 3) {
-            if (cfg->fake_protocol != 0)
-                packet_crypto_set_fake_protocol(cfg->fake_protocol);
-            else
-                packet_crypto_set_fake_protocol(99);
-        }
-    }
-
-    if (!crypto_enabled) {
-        for (int i = 0; i < cfg->local_count; i++) {
-            if (cfg->locals[i].queue_count <= 1) {
-                int want = 4;
-                interface_set_queue_count(cfg->locals[i].ifname, want);
-                int hwq = interface_get_queue_count(cfg->locals[i].ifname);
-                if (hwq > 1)
-                    cfg->locals[i].queue_count = hwq;
-            }
-        }
-        for (int i = 0; i < cfg->wan_count; i++) {
-            if (cfg->wans[i].queue_count <= 1) {
-                int hwq = interface_get_queue_count(cfg->wans[i].ifname);
-                if (hwq > 1)
-                    cfg->wans[i].queue_count = hwq;
-            }
+        if (crypto_layer == 2) {
+            packet_crypto_set_ethertype(cfg->fake_ethertype_ipv4, cfg->fake_ethertype_ipv6);
+            printf("[FORWARDER] crypto: AES-%d, Layer 2, %s, nonce=%dB\n",
+                   cfg->aes_bits,
+                   cfg->crypto_mode == CRYPTO_MODE_GCM ? "GCM+tag16B" : "CTR",
+                   cfg->nonce_size);
+            if (cfg->fake_ethertype_ipv4)
+                printf("[FORWARDER]   IPv4 0x0800 -> fake 0x%04X\n", cfg->fake_ethertype_ipv4);
+            if (cfg->fake_ethertype_ipv6)
+                printf("[FORWARDER]   IPv6 0x86DD -> fake 0x%04X\n", cfg->fake_ethertype_ipv6);
+        } 
+        
+        else if (crypto_layer == 3) {
+            packet_crypto_set_fake_protocol(cfg->fake_protocol);
+            printf("[FORWARDER] crypto: AES-%d, Layer 3, %s, tunnel 5B (+3B frag), IP proto=%d, nonce=%dB\n",
+                   cfg->aes_bits,
+                   cfg->crypto_mode == CRYPTO_MODE_GCM ? "GCM+tag16B" : "CTR",
+                   cfg->fake_protocol, cfg->nonce_size);
+        } 
+        
+        else if (crypto_layer == 4) {
+            packet_crypto_set_fake_protocol(cfg->fake_protocol);
+            printf("[FORWARDER] crypto: AES-%d, Layer 4, %s, tunnel 5B, encrypt app payload, nonce=%dB\n",
+                   cfg->aes_bits,
+                   cfg->crypto_mode == CRYPTO_MODE_GCM ? "GCM+tag16B" : "CTR",
+                   cfg->nonce_size);
         }
     }
 
     uint32_t window_size = cfg->wans[0].window_size;
     flow_table_init(&g_flow_table, window_size, cfg->wan_count);
+    printf("Flow table initialized: window_size=%u bytes, wan_count=%d\n",
+           window_size, cfg->wan_count);
 
     int total_threads = 0;
     for (int i = 0; i < cfg->local_count; i++) {
@@ -506,6 +430,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         interface_set_queue_count(cfg->wans[i].ifname, cfg->wans[i].queue_count);
         total_threads += cfg->wans[i].queue_count;
     }
+    printf("[CONFIG] Total threads: %d (OS scheduled)\n", total_threads);
 
     for (int i = 0; i < cfg->local_count; i++) {
         if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
@@ -516,7 +441,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     }
 
     for (int i = 0; i < cfg->wan_count; i++) {
-        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", 0, 0) != 0) {
+        uint16_t wan_fake4 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv4 : 0;
+        uint16_t wan_fake6 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv6 : 0;
+        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", wan_fake4, wan_fake6) != 0) {
             fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
             goto err_wans;
         }
@@ -562,6 +489,10 @@ void forwarder_run(struct forwarder *fwd) {
 
     int total_threads = total_local_queues + total_wan_queues;
 
+    printf("\n[THREAD] ═══════════════════════════════════════════\n");
+    printf("[THREAD] LOCAL queues: %d, WAN queues: %d, total threads: %d\n",
+           total_local_queues, total_wan_queues, total_threads);
+
     pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
     struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
     if (!threads || !args) {
@@ -583,8 +514,7 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = -1;
-            args[thread_idx].wan_worker_index = -1;
+
             pthread_create(&threads[thread_idx], NULL, local_queue_thread, &args[thread_idx]);
             thread_idx++;
         }
@@ -597,12 +527,13 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = -1;
-            args[thread_idx].wan_worker_index = thread_idx - total_local_queues;
+
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
             thread_idx++;
         }
     }
+
+    printf("[THREAD] ═══════════════════════════════════════════\n\n");
 
     while (running) {
         sleep(1);
@@ -617,28 +548,5 @@ void forwarder_run(struct forwarder *fwd) {
 }
 
 void forwarder_print_stats(struct forwarder *fwd) {
-    if (!fwd) return;
-
-    int nq = (fwd->local_count > 0 && fwd->locals[0].queue_count <= FORWARDER_MAX_LOCAL_QUEUES)
-             ? fwd->locals[0].queue_count : 0;
-    if (nq <= 0) nq = 1;
-
-    uint64_t tx_wait_loops = 0;
-    for (int i = 0; i < fwd->local_count; i++) {
-        for (int q = 0; q < fwd->locals[i].queue_count && q < MAX_QUEUES; q++)
-            tx_wait_loops += fwd->locals[i].queues[q].tx_wait_loops;
-    }
-
-    fprintf(stdout,
-            "[STATS] local_to_wan=%lu wan_to_local=%lu total_dropped=%lu "
-            "dropped_bad_ip=%lu dropped_no_local_match=%lu dropped_local_tx_fail=%lu",
-            fwd->local_to_wan,
-            fwd->wan_to_local,
-            fwd->total_dropped,
-            fwd->dropped_bad_ip,
-            fwd->dropped_no_local_match,
-            fwd->dropped_local_tx_fail);
-    for (int i = 0; i < nq && i < FORWARDER_MAX_LOCAL_QUEUES; i++)
-        fprintf(stdout, " q%d=%lu", i, (unsigned long)fwd->dropped_local_tx_fail_by_queue[i]);
-    fprintf(stdout, " tx_wait_loops=%lu\n", (unsigned long)tx_wait_loops);
+    (void)fwd;
 }

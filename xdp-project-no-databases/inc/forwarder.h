@@ -18,13 +18,6 @@ struct forwarder {
     uint64_t local_to_wan;
     uint64_t wan_to_local;
     uint64_t total_dropped;
-
-    /* Drop detail counters (especially useful in no-crypto mode) */
-    uint64_t dropped_bad_ip;
-    uint64_t dropped_no_local_match;
-    uint64_t dropped_local_tx_fail;
-#define FORWARDER_MAX_LOCAL_QUEUES 16
-    uint64_t dropped_local_tx_fail_by_queue[FORWARDER_MAX_LOCAL_QUEUES];
 };
 
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg);
