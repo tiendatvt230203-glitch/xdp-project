@@ -668,7 +668,7 @@ int frag_try_reassemble_l2(struct frag_table *ft,
         memcpy(entry->eth_hdr, pkt_data, 14);
         memcpy(entry->ip_hdr, ip_hdr, ip_hdr_len);
         entry->ip_hdr_len = ip_hdr_len;
-        entry->orig_proto = ip_hdr[9];
+        entry->orig_proto = (ether_type == 0x0800) ? ip_hdr[9] : ip_hdr[6];
         entry->timestamp_ns = now;
         entry->valid = 1;
         return 0;

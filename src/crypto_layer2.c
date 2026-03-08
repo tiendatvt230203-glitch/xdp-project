@@ -55,8 +55,13 @@ int crypto_layer2_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
 
     memmove(packet + ETH_HEADER_SIZE + nonce_size, packet + ETH_HEADER_SIZE, payload_len);
     memcpy(packet + ETH_HEADER_SIZE, nonce, nonce_size);
-    packet[12] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED >> 8);
-    packet[13] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED & 0xFF);
+    if (ether_type == 0x0800) {
+        packet[12] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED_IPV4 >> 8);
+        packet[13] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED_IPV4 & 0xFF);
+    } else {
+        packet[12] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED_IPV6 >> 8);
+        packet[13] = (uint8_t)(ETHERTYPE_L2_ENCRYPTED_IPV6 & 0xFF);
+    }
 
     const uint8_t *key = packet_crypto_get_key(ctx, KEY_SLOT_CURRENT);
     int enc_off = ETH_HEADER_SIZE + nonce_size;
@@ -84,7 +89,8 @@ int crypto_layer2_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     if (pkt_len < (size_t)enc_off) return -1;
 
     uint16_t ether_type = ((uint16_t)packet[12] << 8) | packet[13];
-    if (ether_type != ETHERTYPE_L2_ENCRYPTED) return (int)pkt_len;
+    if (ether_type != ETHERTYPE_L2_ENCRYPTED_IPV4 && ether_type != ETHERTYPE_L2_ENCRYPTED_IPV6)
+        return (int)pkt_len;
 
     uint8_t nonce[16];
     memcpy(nonce, packet + ETH_HEADER_SIZE, nonce_size);

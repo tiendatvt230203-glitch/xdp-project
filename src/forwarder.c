@@ -417,7 +417,19 @@ static void *wan_queue_thread(void *arg) {
                             __sync_fetch_and_add(&fwd->total_dropped, 1);
                             continue;
                         }
-                    }
+                }
+            }
+        }
+
+            /* L2: phục hồi ethertype chuẩn theo fake (0x88b5→0x0800, 0x88b6→0x86DD) trước khi fw cho client */
+            if (crypto_enabled && crypto_layer == 2 && final_len >= 14) {
+                uint16_t etype = (uint16_t)final_pkt[12] << 8 | final_pkt[13];
+                if (etype == 0x88b5) {
+                    final_pkt[12] = 0x08;
+                    final_pkt[13] = 0x00;
+                } else if (etype == 0x88b6) {
+                    final_pkt[12] = 0x86;
+                    final_pkt[13] = 0xDD;
                 }
             }
 
