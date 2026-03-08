@@ -1099,12 +1099,15 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
     struct ether_header *eth;
     int ret = 0;
 
+#define LOCAL_TX_MAX_WAIT_LOOPS  10000  /* ~2s max then drop pkt to avoid blocking WAN drain */
+
     pthread_mutex_lock(&queue->tx_lock);
 
     uint32_t comp_idx;
     int completed;
     int reserved = 0;
     unsigned int wait_loops = 0;
+    unsigned int total_loops = 0;
 
     while (1) {
         completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
@@ -1116,6 +1119,10 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
             break;
 
         __sync_fetch_and_add(&queue->tx_wait_loops, 1);
+        if (total_loops++ >= LOCAL_TX_MAX_WAIT_LOOPS) {
+            pthread_mutex_unlock(&queue->tx_lock);
+            return -1;  /* drop packet, let WAN thread keep draining */
+        }
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
         if (wait_loops++ > 50) {

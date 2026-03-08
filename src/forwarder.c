@@ -138,7 +138,7 @@ static inline uint32_t flow_hash_local_tq(uint32_t src_ip, uint32_t dst_ip,
 static void *gc_thread(void *arg) {
     (void)arg;
     while (running) {
-        sleep(10);
+        sleep(60);  /* was 10s: GC lock contention caused drop spike at ~10s */
         flow_table_gc(&g_flow_table);
     }
     return NULL;

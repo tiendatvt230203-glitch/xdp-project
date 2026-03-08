@@ -19,7 +19,7 @@
 #define DEFAULT_UMEM_MB_WAN     256
 #define DEFAULT_RING_SIZE       262144
 #define DEFAULT_RING_SIZE_WAN   32768
-#define DEFAULT_WINDOW_KB       2048
+#define DEFAULT_WINDOW_KB       1024  // 1MB window size
 #define DEFAULT_QUEUE_COUNT     1
 #define DEFAULT_LOCAL_RATE_LIMIT_MBPS 0
 
