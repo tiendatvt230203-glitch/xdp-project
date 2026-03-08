@@ -284,7 +284,12 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
                     cfg->encrypt_layer);
             return -1;
         }
-        if (cfg->encrypt_layer == 3 || cfg->encrypt_layer == 4) {
+        if (cfg->encrypt_layer == 2) {
+            if (cfg->fake_ethertype_ipv4 == 0 && cfg->fake_ethertype_ipv6 == 0) {
+                cfg->fake_ethertype_ipv4 = 0x88b5;
+                cfg->fake_ethertype_ipv6 = 0x88b6;
+            }
+        } else if (cfg->encrypt_layer == 3 || cfg->encrypt_layer == 4) {
             if (cfg->fake_protocol == 0)
                 cfg->fake_protocol = 99;
         }

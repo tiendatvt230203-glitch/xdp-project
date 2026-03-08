@@ -3,9 +3,6 @@
 
 #include "packet_crypto.h"
 
-#define ETHERTYPE_L2_ENCRYPTED_IPV4  0x88b5
-#define ETHERTYPE_L2_ENCRYPTED_IPV6  0x88b6
-
 int crypto_layer2_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len);
 int crypto_layer2_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len);
 

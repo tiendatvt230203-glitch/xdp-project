@@ -10,6 +10,8 @@
 #include <openssl/rand.h>
 #include <stdatomic.h>
 
+static uint16_t g_fake_ethertype_ipv4 = 0;
+static uint16_t g_fake_ethertype_ipv6 = 0;
 static uint8_t g_fake_protocol = 99;
 static int g_encrypt_layer = 0;
 static int g_crypto_mode = 0;
@@ -52,6 +54,13 @@ void crypto_read_l3_tunnel_header(const uint8_t *buf, int nonce_size,
     if (proto_flag) *proto_flag = buf[0] >> 7;
     if (orig_proto) *orig_proto = buf[nonce_size];
 }
+
+void packet_crypto_set_ethertype(uint16_t fake_ipv4, uint16_t fake_ipv6) {
+    g_fake_ethertype_ipv4 = fake_ipv4;
+    g_fake_ethertype_ipv6 = fake_ipv6;
+}
+uint16_t packet_crypto_get_fake_ethertype_ipv4(void) { return g_fake_ethertype_ipv4; }
+uint16_t packet_crypto_get_fake_ethertype_ipv6(void) { return g_fake_ethertype_ipv6; }
 
 void packet_crypto_set_encrypt_layer(int layer) { g_encrypt_layer = layer; }
 

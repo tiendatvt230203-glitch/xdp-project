@@ -64,6 +64,8 @@ struct app_config {
     int crypto_enabled;
     uint8_t crypto_key[AES_KEY_LEN];
     int encrypt_layer;
+    uint16_t fake_ethertype_ipv4;
+    uint16_t fake_ethertype_ipv6;
     uint8_t fake_protocol;
     uint32_t local_rate_limit_mbps;
     int crypto_mode;

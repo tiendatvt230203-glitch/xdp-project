@@ -421,18 +421,6 @@ static void *wan_queue_thread(void *arg) {
             }
         }
 
-            /* L2: phục hồi ethertype chuẩn theo fake (0x88b5→0x0800, 0x88b6→0x86DD) trước khi fw cho client */
-            if (crypto_enabled && crypto_layer == 2 && final_len >= 14) {
-                uint16_t etype = (uint16_t)final_pkt[12] << 8 | final_pkt[13];
-                if (etype == 0x88b5) {
-                    final_pkt[12] = 0x08;
-                    final_pkt[13] = 0x00;
-                } else if (etype == 0x88b6) {
-                    final_pkt[12] = 0x86;
-                    final_pkt[13] = 0xDD;
-                }
-            }
-
 wan_rx_forward:
     uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
     if (dest_ip == 0) {
@@ -540,6 +528,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
         packet_crypto_set_mode(cfg->crypto_mode);
         packet_crypto_set_nonce_size(cfg->nonce_size);
+        if (crypto_layer == 2) {
+            packet_crypto_set_ethertype(cfg->fake_ethertype_ipv4, cfg->fake_ethertype_ipv6);
+        }
         if (crypto_layer == 2 || crypto_layer == 3) {
             if (cfg->fake_protocol != 0)
                 packet_crypto_set_fake_protocol(cfg->fake_protocol);
@@ -589,7 +580,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     }
 
     for (int i = 0; i < cfg->wan_count; i++) {
-        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", 0, 0) != 0) {
+        uint16_t wan_fake4 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv4 : 0;
+        uint16_t wan_fake6 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv6 : 0;
+        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", wan_fake4, wan_fake6) != 0) {
             fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
             goto err_wans;
         }
