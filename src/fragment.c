@@ -538,13 +538,14 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
     uint32_t half1 = payload_len / 2;
     uint32_t half2 = payload_len - half1;
 
+    uint16_t pkt_id = frag_next_pkt_id();
+
     /* fragment 0 */
     {
         uint32_t off = 0;
         memcpy(frag1, eth_hdr, 14);
         off += 14;
 
-        uint16_t pkt_id = frag_next_pkt_id();
         frag_write_hdr(frag1 + off, pkt_id, 0);
         off += FRAG_HDR_SIZE;
 
@@ -581,7 +582,6 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
         memcpy(frag2, eth_hdr, 14);
         off += 14;
 
-        uint16_t pkt_id = frag_next_pkt_id();
         frag_write_hdr(frag2 + off, pkt_id, 1);
         off += FRAG_HDR_SIZE;
 

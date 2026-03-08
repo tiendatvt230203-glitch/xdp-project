@@ -238,6 +238,47 @@ static void *local_queue_thread(void *arg) {
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                 }
 
+            } else if (crypto_enabled && crypto_layer == 2 &&
+                       frag_need_split_l2(pkt_lens[i])) {
+
+                uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
+                memcpy(pkt, wan->dst_mac, 6);
+                memcpy(pkt + 6, wan->src_mac, 6);
+
+                uint32_t f1_len = 0, f2_len = 0;
+                if (frag_split_and_encrypt_l2(&crypto_ctx,
+                                               pkt, pkt_lens[i],
+                                               frag1_buf, &f1_len,
+                                               frag2_buf, &f2_len) != 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    continue;
+                }
+
+                memcpy(frag1_buf, wan->dst_mac, 6);
+                memcpy(frag1_buf + 6, wan->src_mac, 6);
+                memcpy(frag2_buf, wan->dst_mac, 6);
+                memcpy(frag2_buf + 6, wan->src_mac, 6);
+
+                uint32_t wire_total = f1_len + f2_len;
+                if (wire_total > pkt_lens[i]) {
+                    flow_table_add_bytes(&g_flow_table,
+                                         src_ip, dst_ip, src_port, dst_port,
+                                         protocol, wire_total - pkt_lens[i]);
+                }
+
+                if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
+                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
+                    wan_used[wan_idx] = 1;
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                }
+
+                if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
+                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                }
+
             } 
             
             else {
@@ -291,7 +332,7 @@ static void *wan_queue_thread(void *arg) {
     uint64_t addrs[MAX_BATCH_SIZE];
 
     struct frag_table *frag_tbl = NULL;
-    if (crypto_enabled && crypto_layer == 3) {
+    if (crypto_enabled && (crypto_layer == 3 || crypto_layer == 2)) {
         frag_tbl = calloc(1, sizeof(struct frag_table));
         if (frag_tbl)
             frag_table_init(frag_tbl);
@@ -358,6 +399,26 @@ static void *wan_queue_thread(void *arg) {
                 }
                 final_pkt = pkt;
                 final_len = pkt_len;
+
+                if (crypto_enabled && crypto_layer == 2 && frag_tbl) {
+                    uint16_t l2_pkt_id;
+                    uint8_t l2_frag_index;
+                    if (frag_is_fragment_l2(pkt, pkt_len, &l2_pkt_id, &l2_frag_index)) {
+                        uint32_t reasm_len = 0;
+                        int ret = frag_try_reassemble_l2(frag_tbl, pkt, pkt_len,
+                                                        l2_pkt_id, l2_frag_index,
+                                                        reassemble_buf, &reasm_len);
+                        if (ret == 0) {
+                            continue;
+                        } else if (ret == 1) {
+                            final_pkt = reassemble_buf;
+                            final_len = reasm_len;
+                        } else {
+                            __sync_fetch_and_add(&fwd->total_dropped, 1);
+                            continue;
+                        }
+                    }
+                }
             }
 
 wan_rx_forward:
