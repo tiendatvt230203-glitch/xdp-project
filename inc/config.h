@@ -14,12 +14,15 @@
 #define CRYPTO_MODE_GCM  1
 
 #define DEFAULT_FRAME_SIZE      4096
-#define DEFAULT_BATCH_SIZE      1024
+#define DEFAULT_BATCH_SIZE      64
 #define DEFAULT_UMEM_MB_LOCAL   2048
 #define DEFAULT_UMEM_MB_WAN     256
 #define DEFAULT_RING_SIZE       262144
 #define DEFAULT_RING_SIZE_WAN   32768
-#define DEFAULT_WINDOW_KB       1024  // 1MB window size
+#define DEFAULT_WINDOW_KB       8192
+
+
+
 #define DEFAULT_QUEUE_COUNT     1
 #define DEFAULT_LOCAL_RATE_LIMIT_MBPS 0
 
@@ -67,7 +70,7 @@ struct app_config {
     uint16_t fake_ethertype_ipv4;
     uint16_t fake_ethertype_ipv6;
     uint8_t fake_protocol;
-    uint32_t local_rate_limit_mbps;
+    // uint32_t local_rate_limit_mbps;
     int crypto_mode;
     int nonce_size;
     int aes_bits;

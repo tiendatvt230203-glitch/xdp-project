@@ -54,7 +54,6 @@ static int load_global_row(struct app_config *cfg, PGresult *res,
         crypto_key_hex[key_hex_len - 1] = '\0';
     }
 
-    cfg->local_rate_limit_mbps = DEFAULT_LOCAL_RATE_LIMIT_MBPS;
     return 0;
 }
 
