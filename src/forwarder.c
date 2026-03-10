@@ -200,7 +200,21 @@ static void *local_queue_thread(void *arg) {
             job.pkt_len = pkt_lens[i];
             job.addr = addrs[i];
 
-            uint32_t target = __sync_fetch_and_add(&g_dispatch_counter, 1) % NUM_WORKERS;
+            /* Chọn worker theo flow-hash để giảm reorder */
+            uint32_t src_ip, dst_ip;
+            uint16_t src_port, dst_port;
+            uint8_t protocol;
+            uint32_t key_hash;
+            if (parse_flow(job.pkt_ptr, job.pkt_len,
+                           &src_ip, &dst_ip,
+                           &src_port, &dst_port,
+                           &protocol) == 0) {
+                key_hash = flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol);
+            } else {
+                key_hash = __sync_fetch_and_add(&g_dispatch_counter, 1);
+            }
+
+            uint32_t target = key_hash % NUM_WORKERS;
             struct worker_ring *ring = &g_worker_rings[target];
 
             int enqueued = 0;
