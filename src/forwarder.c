@@ -14,7 +14,7 @@
 #include <netinet/udp.h>
 #include <net/ethernet.h>
 
-#define NUM_WORKERS 12
+#define NUM_WORKERS 4
 #define WORKER_RING_SIZE 4096
 
 static volatile int running = 1;
@@ -725,6 +725,7 @@ void forwarder_run(struct forwarder *fwd) {
     pthread_create(&gc_tid, NULL, gc_thread, NULL);
 
     int thread_idx = 0;
+    int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
         for (int q = 0; q < local->queue_count; q++) {
@@ -732,12 +733,14 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = -1; 
+            /* Pin 4 thread nhận local vào các core 0-3 */
+            args[thread_idx].core_id = local_rx_idx % 4;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
 
             pthread_create(&threads[thread_idx], NULL, local_queue_thread, &args[thread_idx]);
             thread_idx++;
+            local_rx_idx++;
         }
     }
 
@@ -749,7 +752,7 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = -1; 
+            args[thread_idx].core_id = 6 + (wan_worker_idx % 6); 
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
@@ -764,7 +767,8 @@ void forwarder_run(struct forwarder *fwd) {
         args[thread_idx].iface_idx = -1;
         args[thread_idx].queue_idx = -1;
         args[thread_idx].tx_queue_base = 0;
-        args[thread_idx].core_id = w; 
+        /* Pin 4 worker local->wan vào các core 4-7 */
+        args[thread_idx].core_id = 4 + w; 
         args[thread_idx].wan_worker_index = -1;
         args[thread_idx].worker_id = w;
         pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);
