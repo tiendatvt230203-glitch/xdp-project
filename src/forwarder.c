@@ -1027,10 +1027,9 @@ void forwarder_cleanup(struct forwarder *fwd) {
         interface_cleanup(&fwd->wans[i]);
 }
 
-void forwarder_run(struct forwarder *fwd) {
-    signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigint_handler);
+/* ========= Per-option forwarder_run implementations (Local <-> WAN) ========= */
 
+static void forwarder_run_no_crypto(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
         total_local_queues += fwd->locals[i].queue_count;
@@ -1039,22 +1038,85 @@ void forwarder_run(struct forwarder *fwd) {
     for (int i = 0; i < fwd->wan_count; i++)
         total_wan_queues += fwd->wans[i].queue_count;
 
-    int total_threads = total_local_queues + total_wan_queues + NUM_WORKERS;
+    int total_threads = total_local_queues + total_wan_queues;
 
     pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
     struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
-    
     if (!threads || !args) {
-        fprintf(stderr, "Failed to allocate thread arrays\n");
+        fprintf(stderr, "Failed to allocate thread arrays (no-crypto)\n");
         free(threads); free(args);
         return;
     }
 
-    for (int w = 0; w < NUM_WORKERS; w++) {
-        g_worker_rings[w].head = 0;
-        g_worker_rings[w].tail = 0;
-        pthread_mutex_init(&g_worker_rings[w].lock, NULL);
+    pthread_t gc_tid;
+    pthread_create(&gc_tid, NULL, gc_thread, NULL);
+
+    int thread_idx = 0;
+    int local_rx_idx = 0;
+    for (int i = 0; i < fwd->local_count; i++) {
+        struct xsk_interface *local = &fwd->locals[i];
+        for (int q = 0; q < local->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = local_rx_idx % 4; /* core 0-3 */
+            args[thread_idx].wan_worker_index = -1;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, local_queue_thread, &args[thread_idx]);
+            thread_idx++;
+            local_rx_idx++;
+        }
     }
+
+    int wan_worker_idx = 0;
+    for (int i = 0; i < fwd->wan_count; i++) {
+        struct xsk_interface *wan = &fwd->wans[i];
+        for (int q = 0; q < wan->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = 8 + (wan_worker_idx % 4); /* core 8-11 */
+            args[thread_idx].wan_worker_index = wan_worker_idx;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
+            wan_worker_idx++;
+            thread_idx++;
+        }
+    }
+
+    while (running)
+        sleep(1);
+
+    for (int i = 0; i < total_threads; i++)
+        pthread_join(threads[i], NULL);
+    pthread_join(gc_tid, NULL);
+
+    free(threads);
+    free(args);
+}
+
+static void forwarder_run_l2(struct forwarder *fwd) {
+    int total_local_queues = 0;
+    for (int i = 0; i < fwd->local_count; i++)
+        total_local_queues += fwd->locals[i].queue_count;
+
+    int total_wan_queues = 0;
+    for (int i = 0; i < fwd->wan_count; i++)
+        total_wan_queues += fwd->wans[i].queue_count;
+
+    /* 4 RX local + 4 L2 workers + WAN RX threads */
+    int total_threads = total_local_queues + total_wan_queues + MAX_LOCAL_L2_QUEUES;
+
+    pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
+    struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
+    if (!threads || !args) {
+        fprintf(stderr, "Failed to allocate thread arrays (L2)\n");
+        free(threads); free(args);
+        return;
+    }
+
     for (int i = 0; i < MAX_LOCAL_L2_QUEUES; i++) {
         g_l2_rings[i].head = 0;
         g_l2_rings[i].tail = 0;
@@ -1072,8 +1134,99 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            /* Pin 4 thread nhận local vào các core 0-3 */
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = local_rx_idx % 4; /* core 0-3 */
+            args[thread_idx].wan_worker_index = -1;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, local_queue_thread, &args[thread_idx]);
+            thread_idx++;
+            local_rx_idx++;
+        }
+    }
+
+    int wan_worker_idx = 0;
+    for (int i = 0; i < fwd->wan_count; i++) {
+        struct xsk_interface *wan = &fwd->wans[i];
+        for (int q = 0; q < wan->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = 8 + (wan_worker_idx % 4); /* core 8-11 */
+            args[thread_idx].wan_worker_index = wan_worker_idx;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
+            wan_worker_idx++;
+            thread_idx++;
+        }
+    }
+
+    /* L2: mỗi local queue có 1 worker riêng trên core 4-7 */
+    int l2_worker_idx = 0;
+    for (int i = 0; i < fwd->local_count && l2_worker_idx < MAX_LOCAL_L2_QUEUES; i++) {
+        struct xsk_interface *local = &fwd->locals[i];
+        for (int q = 0; q < local->queue_count && l2_worker_idx < MAX_LOCAL_L2_QUEUES; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = 4 + l2_worker_idx; /* (0,4), (1,5), (2,6), (3,7) */
+            args[thread_idx].wan_worker_index = -1;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, local_l2_worker_thread, &args[thread_idx]);
+            thread_idx++;
+            l2_worker_idx++;
+        }
+    }
+
+    while (running)
+        sleep(1);
+
+    for (int i = 0; i < total_threads; i++)
+        pthread_join(threads[i], NULL);
+    pthread_join(gc_tid, NULL);
+
+    free(threads);
+    free(args);
+}
+
+static void forwarder_run_l3(struct forwarder *fwd) {
+    int total_local_queues = 0;
+    for (int i = 0; i < fwd->local_count; i++)
+        total_local_queues += fwd->locals[i].queue_count;
+
+    int total_wan_queues = 0;
+    for (int i = 0; i < fwd->wan_count; i++)
+        total_wan_queues += fwd->wans[i].queue_count;
+
+    int total_threads = total_local_queues + total_wan_queues + NUM_WORKERS;
+
+    pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
+    struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
+    if (!threads || !args) {
+        fprintf(stderr, "Failed to allocate thread arrays (L3)\n");
+        free(threads); free(args);
+        return;
+    }
+
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        g_worker_rings[w].head = 0;
+        g_worker_rings[w].tail = 0;
+        pthread_mutex_init(&g_worker_rings[w].lock, NULL);
+    }
+
+    pthread_t gc_tid;
+    pthread_create(&gc_tid, NULL, gc_thread, NULL);
+
+    int thread_idx = 0;
+    int local_rx_idx = 0;
+    for (int i = 0; i < fwd->local_count; i++) {
+        struct xsk_interface *local = &fwd->locals[i];
+        for (int q = 0; q < local->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = local_rx_idx % 4; /* core 0-3 */
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
 
@@ -1083,7 +1236,7 @@ void forwarder_run(struct forwarder *fwd) {
         }
     }
 
-    int wan_worker_idx = 0; 
+    int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
         for (int q = 0; q < wan->queue_count; q++) {
@@ -1091,54 +1244,30 @@ void forwarder_run(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            /* Pin các thread WAN RX/forward vào core 8-11 (chiều WAN->Local) */
-            args[thread_idx].core_id = 8 + (wan_worker_idx % 4); 
+            args[thread_idx].core_id = 8 + (wan_worker_idx % 4); /* core 8-11 */
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
-            
-            wan_worker_idx++; 
+            wan_worker_idx++;
             thread_idx++;
         }
     }
 
-    /* Nếu không phải layer2, dùng generic worker_thread cho local->WAN. */
-    if (!(crypto_enabled && crypto_layer == 2)) {
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            args[thread_idx].fwd = fwd;
-            args[thread_idx].iface_idx = -1;
-            args[thread_idx].queue_idx = -1;
-            args[thread_idx].tx_queue_base = 0;
-            /* Pin 4 worker local->wan vào các core 4-7 */
-            args[thread_idx].core_id = 4 + w; 
-            args[thread_idx].wan_worker_index = -1;
-            args[thread_idx].worker_id = w;
-            pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);
-            thread_idx++;
-        }
-    } else {
-        /* Layer2: mỗi local queue có 1 worker riêng trên core 4-7 */
-        int l2_worker_idx = 0;
-        for (int i = 0; i < fwd->local_count && l2_worker_idx < MAX_LOCAL_L2_QUEUES; i++) {
-            struct xsk_interface *local = &fwd->locals[i];
-            for (int q = 0; q < local->queue_count && l2_worker_idx < MAX_LOCAL_L2_QUEUES; q++) {
-                args[thread_idx].fwd = fwd;
-                args[thread_idx].iface_idx = i;
-                args[thread_idx].queue_idx = q;
-                args[thread_idx].tx_queue_base = q;
-                args[thread_idx].core_id = 4 + l2_worker_idx; /* cặp (0,4), (1,5), (2,6), (3,7) */
-                args[thread_idx].wan_worker_index = -1;
-                args[thread_idx].worker_id = -1;
-                pthread_create(&threads[thread_idx], NULL, local_l2_worker_thread, &args[thread_idx]);
-                thread_idx++;
-                l2_worker_idx++;
-            }
-        }
+    /* Generic worker threads cho L3 trên core 4-7 */
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        args[thread_idx].fwd = fwd;
+        args[thread_idx].iface_idx = -1;
+        args[thread_idx].queue_idx = -1;
+        args[thread_idx].tx_queue_base = 0;
+        args[thread_idx].core_id = 4 + w; /* core 4-7 */
+        args[thread_idx].wan_worker_index = -1;
+        args[thread_idx].worker_id = w;
+        pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);
+        thread_idx++;
     }
 
-    while (running) {
+    while (running)
         sleep(1);
-    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1146,6 +1275,112 @@ void forwarder_run(struct forwarder *fwd) {
 
     free(threads);
     free(args);
+}
+
+static void forwarder_run_l4(struct forwarder *fwd) {
+    int total_local_queues = 0;
+    for (int i = 0; i < fwd->local_count; i++)
+        total_local_queues += fwd->locals[i].queue_count;
+
+    int total_wan_queues = 0;
+    for (int i = 0; i < fwd->wan_count; i++)
+        total_wan_queues += fwd->wans[i].queue_count;
+
+    int total_threads = total_local_queues + total_wan_queues + NUM_WORKERS;
+
+    pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
+    struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
+    if (!threads || !args) {
+        fprintf(stderr, "Failed to allocate thread arrays (L4)\n");
+        free(threads); free(args);
+        return;
+    }
+
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        g_worker_rings[w].head = 0;
+        g_worker_rings[w].tail = 0;
+        pthread_mutex_init(&g_worker_rings[w].lock, NULL);
+    }
+
+    pthread_t gc_tid;
+    pthread_create(&gc_tid, NULL, gc_thread, NULL);
+
+    int thread_idx = 0;
+    int local_rx_idx = 0;
+    for (int i = 0; i < fwd->local_count; i++) {
+        struct xsk_interface *local = &fwd->locals[i];
+        for (int q = 0; q < local->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = local_rx_idx % 4; /* core 0-3 */
+            args[thread_idx].wan_worker_index = -1;
+            args[thread_idx].worker_id = -1;
+
+            pthread_create(&threads[thread_idx], NULL, local_queue_thread, &args[thread_idx]);
+            thread_idx++;
+            local_rx_idx++;
+        }
+    }
+
+    int wan_worker_idx = 0;
+    for (int i = 0; i < fwd->wan_count; i++) {
+        struct xsk_interface *wan = &fwd->wans[i];
+        for (int q = 0; q < wan->queue_count; q++) {
+            args[thread_idx].fwd = fwd;
+            args[thread_idx].iface_idx = i;
+            args[thread_idx].queue_idx = q;
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = 8 + (wan_worker_idx % 4); /* core 8-11 */
+            args[thread_idx].wan_worker_index = wan_worker_idx;
+            args[thread_idx].worker_id = -1;
+            pthread_create(&threads[thread_idx], NULL, wan_queue_thread, &args[thread_idx]);
+            wan_worker_idx++;
+            thread_idx++;
+        }
+    }
+
+    /* Generic worker threads cho L4 trên core 4-7 (tách riêng hàm nhưng reuse worker_thread) */
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        args[thread_idx].fwd = fwd;
+        args[thread_idx].iface_idx = -1;
+        args[thread_idx].queue_idx = -1;
+        args[thread_idx].tx_queue_base = 0;
+        args[thread_idx].core_id = 4 + w; /* core 4-7 */
+        args[thread_idx].wan_worker_index = -1;
+        args[thread_idx].worker_id = w;
+        pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);
+        thread_idx++;
+    }
+
+    while (running)
+        sleep(1);
+
+    for (int i = 0; i < total_threads; i++)
+        pthread_join(threads[i], NULL);
+    pthread_join(gc_tid, NULL);
+
+    free(threads);
+    free(args);
+}
+
+void forwarder_run(struct forwarder *fwd) {
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
+
+    if (!crypto_enabled) {
+        forwarder_run_no_crypto(fwd);
+    } else if (crypto_layer == 2) {
+        forwarder_run_l2(fwd);
+    } else if (crypto_layer == 3) {
+        forwarder_run_l3(fwd);
+    } else if (crypto_layer == 4) {
+        forwarder_run_l4(fwd);
+    } else {
+        /* Fallback: treat as L3-style generic pipeline */
+        forwarder_run_l3(fwd);
+    }
 }
 
 void forwarder_print_stats(struct forwarder *fwd) {
