@@ -244,48 +244,186 @@ static void *local_queue_thread(void *arg) {
             }
 
             continue;
+        } else if (!crypto_enabled) {
+            /* No-crypto: xử lý full pipeline ngay trong 4 thread local trên core 0-3,
+             * không dùng worker hay ring. */
+            int wan_used[MAX_INTERFACES] = {0};
+            int wan_tx_q[MAX_INTERFACES];
+            for (int w = 0; w < fwd->wan_count; w++)
+                wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
+
+            for (int i = 0; i < rcvd; i++) {
+                uint32_t src_ip, dst_ip;
+                uint16_t src_port, dst_port;
+                uint8_t protocol;
+
+                int wan_idx;
+                if (parse_flow(pkt_ptrs[i], pkt_lens[i],
+                               &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0) {
+                    wan_idx = flow_table_get_wan(&g_flow_table,
+                                                 src_ip, dst_ip, src_port, dst_port,
+                                                 protocol, pkt_lens[i]);
+                } else {
+                    wan_idx = 0;
+                }
+
+                if (wan_idx < 0 || wan_idx >= fwd->wan_count)
+                    wan_idx = 0;
+
+                struct xsk_interface *wan = &fwd->wans[wan_idx];
+                int tq = wan_tx_q[wan_idx];
+
+                uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
+                memcpy(pkt, wan->dst_mac, 6);
+                memcpy(pkt + 6, wan->src_mac, 6);
+
+                if (interface_send_batch_queue(wan, tq, pkt, pkt_lens[i]) == 0) {
+                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
+                    wan_used[wan_idx] = 1;
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                }
+            }
+
+            for (int w = 0; w < fwd->wan_count; w++) {
+                if (wan_used[w])
+                    interface_send_flush_queue(&fwd->wans[w], wan_tx_q[w]);
+            }
+
+            interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
+            continue;
         }
 
-        /* Các mode khác vẫn dùng mô hình receiver + worker */
-        for (int i = 0; i < rcvd; i++) {
-            struct packet_job job;
-            job.fwd = fwd;
-            job.local_idx = local_idx;
-            job.queue_idx = queue_idx;
-            job.tx_queue_base = tx_base;
-            job.pkt_ptr = pkt_ptrs[i];
-            job.pkt_len = pkt_lens[i];
-            job.addr = addrs[i];
+        /* Các mode crypto khác: tách rõ L3 và L4, dù hiện tại
+         * cả hai đang dùng chung mô hình receiver + worker. */
+        else if (crypto_enabled && crypto_layer == 3) {
+            /* Pipeline L3 riêng (hiện tại: enqueue vào generic worker_thread). */
+            for (int i = 0; i < rcvd; i++) {
+                struct packet_job job;
+                job.fwd = fwd;
+                job.local_idx = local_idx;
+                job.queue_idx = queue_idx;
+                job.tx_queue_base = tx_base;
+                job.pkt_ptr = pkt_ptrs[i];
+                job.pkt_len = pkt_lens[i];
+                job.addr = addrs[i];
 
-            uint32_t src_ip, dst_ip;
-            uint16_t src_port, dst_port;
-            uint8_t protocol;
-            uint32_t key_hash;
-            if (parse_flow(job.pkt_ptr, job.pkt_len,
-                           &src_ip, &dst_ip,
-                           &src_port, &dst_port,
-                           &protocol) == 0) {
-                key_hash = flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol);
-            } else {
-                key_hash = __sync_fetch_and_add(&g_dispatch_counter, 1);
+                uint32_t src_ip, dst_ip;
+                uint16_t src_port, dst_port;
+                uint8_t protocol;
+                uint32_t key_hash;
+                if (parse_flow(job.pkt_ptr, job.pkt_len,
+                               &src_ip, &dst_ip,
+                               &src_port, &dst_port,
+                               &protocol) == 0) {
+                    key_hash = flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol);
+                } else {
+                    key_hash = __sync_fetch_and_add(&g_dispatch_counter, 1);
+                }
+
+                uint32_t target = key_hash % NUM_WORKERS;
+                struct worker_ring *ring = &g_worker_rings[target];
+
+                int enqueued = 0;
+                pthread_mutex_lock(&ring->lock);
+                uint32_t next_tail = (ring->tail + 1) % WORKER_RING_SIZE;
+                if (next_tail != ring->head) {
+                    ring->jobs[ring->tail] = job;
+                    ring->tail = next_tail;
+                    enqueued = 1;
+                }
+                pthread_mutex_unlock(&ring->lock);
+
+                if (!enqueued) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
+                }
             }
+        } else if (crypto_enabled && crypto_layer == 4) {
+            /* Pipeline L4 riêng (hiện tại: cũng enqueue vào generic worker_thread). */
+            for (int i = 0; i < rcvd; i++) {
+                struct packet_job job;
+                job.fwd = fwd;
+                job.local_idx = local_idx;
+                job.queue_idx = queue_idx;
+                job.tx_queue_base = tx_base;
+                job.pkt_ptr = pkt_ptrs[i];
+                job.pkt_len = pkt_lens[i];
+                job.addr = addrs[i];
 
-            uint32_t target = key_hash % NUM_WORKERS;
-            struct worker_ring *ring = &g_worker_rings[target];
+                uint32_t src_ip, dst_ip;
+                uint16_t src_port, dst_port;
+                uint8_t protocol;
+                uint32_t key_hash;
+                if (parse_flow(job.pkt_ptr, job.pkt_len,
+                               &src_ip, &dst_ip,
+                               &src_port, &dst_port,
+                               &protocol) == 0) {
+                    key_hash = flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol);
+                } else {
+                    key_hash = __sync_fetch_and_add(&g_dispatch_counter, 1);
+                }
 
-            int enqueued = 0;
-            pthread_mutex_lock(&ring->lock);
-            uint32_t next_tail = (ring->tail + 1) % WORKER_RING_SIZE;
-            if (next_tail != ring->head) {
-                ring->jobs[ring->tail] = job;
-                ring->tail = next_tail;
-                enqueued = 1;
+                uint32_t target = key_hash % NUM_WORKERS;
+                struct worker_ring *ring = &g_worker_rings[target];
+
+                int enqueued = 0;
+                pthread_mutex_lock(&ring->lock);
+                uint32_t next_tail = (ring->tail + 1) % WORKER_RING_SIZE;
+                if (next_tail != ring->head) {
+                    ring->jobs[ring->tail] = job;
+                    ring->tail = next_tail;
+                    enqueued = 1;
+                }
+                pthread_mutex_unlock(&ring->lock);
+
+                if (!enqueued) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
+                }
             }
-            pthread_mutex_unlock(&ring->lock);
+        } else {
+            /* Fallback: các mode chưa được tách riêng khác, vẫn enqueue vào generic worker. */
+            for (int i = 0; i < rcvd; i++) {
+                struct packet_job job;
+                job.fwd = fwd;
+                job.local_idx = local_idx;
+                job.queue_idx = queue_idx;
+                job.tx_queue_base = tx_base;
+                job.pkt_ptr = pkt_ptrs[i];
+                job.pkt_len = pkt_lens[i];
+                job.addr = addrs[i];
 
-            if (!enqueued) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
+                uint32_t src_ip, dst_ip;
+                uint16_t src_port, dst_port;
+                uint8_t protocol;
+                uint32_t key_hash;
+                if (parse_flow(job.pkt_ptr, job.pkt_len,
+                               &src_ip, &dst_ip,
+                               &src_port, &dst_port,
+                               &protocol) == 0) {
+                    key_hash = flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol);
+                } else {
+                    key_hash = __sync_fetch_and_add(&g_dispatch_counter, 1);
+                }
+
+                uint32_t target = key_hash % NUM_WORKERS;
+                struct worker_ring *ring = &g_worker_rings[target];
+
+                int enqueued = 0;
+                pthread_mutex_lock(&ring->lock);
+                uint32_t next_tail = (ring->tail + 1) % WORKER_RING_SIZE;
+                if (next_tail != ring->head) {
+                    ring->jobs[ring->tail] = job;
+                    ring->tail = next_tail;
+                    enqueued = 1;
+                }
+                pthread_mutex_unlock(&ring->lock);
+
+                if (!enqueued) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
+                }
             }
         }
     }
