@@ -892,6 +892,18 @@ static void forwarder_run_l2(struct forwarder *fwd) {
     for (int i = 0; i < fwd->wan_count; i++)
         total_wan_queues += fwd->wans[i].queue_count;
 
+    /* DEBUG: In ra số queue đang sử dụng */
+    fprintf(stderr, "[L2 DEBUG] total_local_queues=%d, total_wan_queues=%d\n",
+            total_local_queues, total_wan_queues);
+    for (int i = 0; i < fwd->local_count; i++) {
+        fprintf(stderr, "[L2 DEBUG] local[%d] ifname=%s queue_count=%d\n",
+                i, fwd->locals[i].ifname, fwd->locals[i].queue_count);
+    }
+    for (int i = 0; i < fwd->wan_count; i++) {
+        fprintf(stderr, "[L2 DEBUG] wan[%d] ifname=%s queue_count=%d\n",
+                i, fwd->wans[i].ifname, fwd->wans[i].queue_count);
+    }
+
     /* L2 không dùng worker riêng, mỗi thread tự xử lý full pipeline */
     int total_threads = total_local_queues + total_wan_queues;
 
