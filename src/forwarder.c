@@ -725,16 +725,19 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    if (!crypto_enabled) {
-        for (int i = 0; i < cfg->local_count; i++) {
-            if (cfg->locals[i].queue_count <= 1) {
-                int want = 4;
-                interface_set_queue_count(cfg->locals[i].ifname, want);
-                int hwq = interface_get_queue_count(cfg->locals[i].ifname);
-                if (hwq > 1)
-                    cfg->locals[i].queue_count = hwq;
-            }
+    /* Tự động set queue count cho local nếu chưa được config */
+    for (int i = 0; i < cfg->local_count; i++) {
+        if (cfg->locals[i].queue_count <= 1) {
+            int want = 4;
+            interface_set_queue_count(cfg->locals[i].ifname, want);
+            int hwq = interface_get_queue_count(cfg->locals[i].ifname);
+            if (hwq > 1)
+                cfg->locals[i].queue_count = hwq;
         }
+    }
+
+    /* Tự động set queue count cho WAN nếu chưa được config */
+    if (!crypto_enabled) {
         for (int i = 0; i < cfg->wan_count; i++) {
             if (cfg->wans[i].queue_count <= 1) {
                 int hwq = interface_get_queue_count(cfg->wans[i].ifname);
