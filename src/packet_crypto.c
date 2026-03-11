@@ -23,9 +23,14 @@ static atomic_uint_fast32_t g_nonce_counter = 0;
 static __thread EVP_CIPHER_CTX *tls_ctx = NULL;
 static __thread EVP_CIPHER_CTX *tls_gcm_enc_ctx = NULL;
 static __thread EVP_CIPHER_CTX *tls_gcm_dec_ctx = NULL;
+/* Encrypt context cache */
 static __thread uint8_t tls_cached_key[AES_MAX_KEY_SIZE];
 static __thread int tls_key_cached = 0;
 static __thread int tls_cached_nonce_len = 0;
+/* Decrypt context cache */
+static __thread uint8_t tls_dec_cached_key[AES_MAX_KEY_SIZE];
+static __thread int tls_dec_key_cached = 0;
+static __thread int tls_dec_cached_nonce_len = 0;
 
 static EVP_CIPHER_CTX *get_ctx(void) {
     if (!tls_ctx) {
@@ -250,11 +255,6 @@ int crypto_aes_gcm_encrypt(const uint8_t key[AES_MAX_KEY_SIZE],
 
     return 0;
 }
-
-/* Thread-local cache cho decrypt context */
-static __thread uint8_t tls_dec_cached_key[AES_MAX_KEY_SIZE];
-static __thread int tls_dec_key_cached = 0;
-static __thread int tls_dec_cached_nonce_len = 0;
 
 int crypto_aes_gcm_decrypt(const uint8_t key[AES_MAX_KEY_SIZE],
                            const uint8_t *nonce, int nonce_len,
