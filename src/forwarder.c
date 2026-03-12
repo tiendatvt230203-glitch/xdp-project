@@ -21,7 +21,7 @@
  * RING MODE: Software ring buffer để không phụ thuộc số queue NIC
  * ======================================================================== */
 #define NUM_RING_WORKERS 5
-#define SW_RING_SIZE 8192
+#define SW_RING_SIZE 32768  /* Tăng cho 300+ connections */
 
 struct ring_packet {
     uint8_t data[2048];
@@ -34,7 +34,7 @@ struct sw_ring {
     struct ring_packet packets[SW_RING_SIZE];
     volatile uint32_t head;  /* Consumer đọc từ đây */
     volatile uint32_t tail;  /* Producer ghi vào đây */
-    pthread_mutex_t lock;    /* Lock cho multiple producers */
+    pthread_spinlock_t lock; /* Spinlock cho multiple producers - nhanh hơn mutex */
 } __attribute__((aligned(64)));
 
 /* Ring cho Local → WAN (5 rings, mỗi worker 1 ring) */
@@ -883,11 +883,11 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
     for (int i = 0; i < NUM_RING_WORKERS; i++) {
         g_local_to_wan_rings[i].head = 0;
         g_local_to_wan_rings[i].tail = 0;
-        pthread_mutex_init(&g_local_to_wan_rings[i].lock, NULL);
+        pthread_spin_init(&g_local_to_wan_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
         
         g_wan_to_local_rings[i].head = 0;
         g_wan_to_local_rings[i].tail = 0;
-        pthread_mutex_init(&g_wan_to_local_rings[i].lock, NULL);
+        pthread_spin_init(&g_wan_to_local_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
     }
     
     int total_local_queues = 0;
@@ -1209,14 +1209,14 @@ static inline uint32_t ring_flow_hash(const uint8_t *pkt, uint32_t len) {
     return 0;
 }
 
-/* Helper: Enqueue packet vào ring (thread-safe) */
+/* Helper: Enqueue packet vào ring (thread-safe với spinlock) */
 static inline int ring_enqueue(struct sw_ring *ring, const uint8_t *pkt, uint32_t len,
                                int iface_idx, int queue_idx) {
-    pthread_mutex_lock(&ring->lock);
+    pthread_spin_lock(&ring->lock);
     
     uint32_t next_tail = (ring->tail + 1) % SW_RING_SIZE;
     if (next_tail == ring->head) {
-        pthread_mutex_unlock(&ring->lock);
+        pthread_spin_unlock(&ring->lock);
         return -1; /* Ring full */
     }
     
@@ -1228,7 +1228,7 @@ static inline int ring_enqueue(struct sw_ring *ring, const uint8_t *pkt, uint32_
     slot->src_queue_idx = queue_idx;
     
     ring->tail = next_tail;
-    pthread_mutex_unlock(&ring->lock);
+    pthread_spin_unlock(&ring->lock);
     return 0;
 }
 
@@ -1388,12 +1388,21 @@ static void *local_to_wan_ring_worker(void *arg) {
     /* Layer 2 encryption */
     int is_l2_crypto = crypto_enabled && crypto_layer == 2;
     
+    int empty_count = 0;
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
-            /* Ring empty, yield CPU */
-            usleep(1);
+            /* Ring empty - adaptive wait */
+            if (++empty_count < 1000) {
+                __asm__ volatile("pause");  /* CPU hint for spin-wait */
+            } else if (empty_count < 10000) {
+                sched_yield();
+            } else {
+                usleep(10);
+                empty_count = 5000; /* Reset để không sleep quá nhiều */
+            }
             continue;
         }
+        empty_count = 0;
         
         __sync_fetch_and_add(&g_l2w_worker_processed, 1);
         
@@ -1494,12 +1503,21 @@ static void *wan_to_local_ring_worker(void *arg) {
     uint8_t reassemble_buf[4096];
     int gc_counter = 0;
     
+    int empty_count = 0;
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
-            /* Ring empty, yield CPU */
-            usleep(1);
+            /* Ring empty - adaptive wait */
+            if (++empty_count < 1000) {
+                __asm__ volatile("pause");
+            } else if (empty_count < 10000) {
+                sched_yield();
+            } else {
+                usleep(10);
+                empty_count = 5000;
+            }
             continue;
         }
+        empty_count = 0;
         
         __sync_fetch_and_add(&g_w2l_worker_processed, 1);
         
@@ -1584,11 +1602,11 @@ static void forwarder_run_ring_mode(struct forwarder *fwd) {
     for (int i = 0; i < NUM_RING_WORKERS; i++) {
         g_local_to_wan_rings[i].head = 0;
         g_local_to_wan_rings[i].tail = 0;
-        pthread_mutex_init(&g_local_to_wan_rings[i].lock, NULL);
+        pthread_spin_init(&g_local_to_wan_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
         
         g_wan_to_local_rings[i].head = 0;
         g_wan_to_local_rings[i].tail = 0;
-        pthread_mutex_init(&g_wan_to_local_rings[i].lock, NULL);
+        pthread_spin_init(&g_wan_to_local_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
     }
     
     /* Count total threads:
