@@ -576,7 +576,7 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
         *frag1_len = (uint32_t)enc_len;
     }
 
-    /* fragment 1 */
+    /* fragment 1 - TỐI ƯU: Chỉ Eth + FRAG_HDR + half2 payload, KHÔNG có IP header */
     {
         uint32_t off = 0;
         memcpy(frag2, eth_hdr, 14);
@@ -585,27 +585,11 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
         frag_write_hdr(frag2 + off, pkt_id, 1);
         off += FRAG_HDR_SIZE;
 
-        memcpy(frag2 + off, ip_hdr, ip_hdr_len);
-        off += ip_hdr_len;
-
+        /* Chỉ copy nửa sau payload, KHÔNG copy IP header */
         memcpy(frag2 + off, payload + half1, half2);
         off += half2;
 
-        if (ether_type == 0x0800) {
-            uint16_t ip_total = (uint16_t)(ip_hdr_len + half2);
-            frag2[14 + FRAG_HDR_SIZE + 2] = (uint8_t)(ip_total >> 8);
-            frag2[14 + FRAG_HDR_SIZE + 3] = (uint8_t)(ip_total & 0xFF);
-
-            frag2[14 + FRAG_HDR_SIZE + 10] = 0;
-            frag2[14 + FRAG_HDR_SIZE + 11] = 0;
-            uint16_t cksum = crypto_calc_ip_checksum(frag2 + 14 + FRAG_HDR_SIZE, ip_hdr_len);
-            frag2[14 + FRAG_HDR_SIZE + 10] = (uint8_t)(cksum >> 8);
-            frag2[14 + FRAG_HDR_SIZE + 11] = (uint8_t)(cksum & 0xFF);
-        } else {
-            uint16_t ipv6_paylen = (uint16_t)half2;
-            frag2[14 + FRAG_HDR_SIZE + 4] = (uint8_t)(ipv6_paylen >> 8);
-            frag2[14 + FRAG_HDR_SIZE + 5] = (uint8_t)(ipv6_paylen & 0xFF);
-        }
+        /* Không cần tính checksum vì không có IP header */
 
         int enc_len = crypto_layer2_encrypt(ctx, frag2, off);
         if (enc_len < 0) return -1;
@@ -617,18 +601,30 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
 
 int frag_is_fragment_l2(const uint8_t *pkt_data, uint32_t pkt_len,
                         uint16_t *pkt_id, uint8_t *frag_index) {
-    if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
+    if (pkt_len < 14 + FRAG_HDR_SIZE + 1)
         return 0;
 
-    uint8_t ver = pkt_data[14] >> 4;
-    if (ver == 4 || ver == 6)
-        return 0;
+    /* Byte 14 đầu tiên của FRAG_HDR là pkt_id high byte
+     * Kiểm tra: nếu byte 14 không phải IP version (4 hoặc 6) → có thể là fragment */
+    uint8_t first_byte = pkt_data[14] >> 4;
+    if (first_byte == 4 || first_byte == 6)
+        return 0;  /* Đây là gói IP bình thường, không phải fragment */
 
-    uint8_t inner_ver = pkt_data[14 + FRAG_HDR_SIZE] >> 4;
-    if (!(inner_ver == 4 || inner_ver == 6))
-        return 0;
-
+    /* Đọc FRAG_HDR */
     frag_read_hdr(pkt_data + 14, pkt_id, frag_index);
+    
+    /* Fragment 0: có IP header sau FRAG_HDR
+     * Fragment 1: chỉ có payload sau FRAG_HDR */
+    if (*frag_index == 0) {
+        /* Fragment 0 phải có IP header */
+        if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
+            return 0;
+        uint8_t inner_ver = pkt_data[14 + FRAG_HDR_SIZE] >> 4;
+        if (!(inner_ver == 4 || inner_ver == 6))
+            return 0;
+    }
+    /* Fragment 1 không cần check IP header */
+    
     return 1;
 }
 
@@ -636,30 +632,30 @@ int frag_try_reassemble_l2(struct frag_table *ft,
                            const uint8_t *pkt_data, uint32_t pkt_len,
                            uint16_t pkt_id, uint8_t frag_index,
                            uint8_t *out_buf, uint32_t *out_len) {
-    if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
-        return -1;
-
-    const uint8_t *ip_hdr = pkt_data + 14 + FRAG_HDR_SIZE;
     uint16_t ether_type = ((uint16_t)pkt_data[12] << 8) | pkt_data[13];
-
-    int ip_hdr_len;
-    if (ether_type == 0x0800) {
-        ip_hdr_len = (ip_hdr[0] & 0x0F) * 4;
-        if (ip_hdr_len < 20) return -1;
-    } else if (ether_type == 0x86DD) {
-        ip_hdr_len = 40;
-    } else {
-        return -1;
-    }
-
-    const uint8_t *payload = pkt_data + 14 + FRAG_HDR_SIZE + ip_hdr_len;
-    uint32_t payload_len = pkt_len - (14 + FRAG_HDR_SIZE + ip_hdr_len);
-
     int idx = pkt_id % FRAG_TABLE_SIZE;
     struct frag_entry *entry = &ft->entries[idx];
     uint64_t now = get_time_ns();
 
     if (frag_index == 0) {
+        /* Fragment 0: có IP header đầy đủ */
+        if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
+            return -1;
+
+        const uint8_t *ip_hdr = pkt_data + 14 + FRAG_HDR_SIZE;
+        int ip_hdr_len;
+        if (ether_type == 0x0800) {
+            ip_hdr_len = (ip_hdr[0] & 0x0F) * 4;
+            if (ip_hdr_len < 20) return -1;
+        } else if (ether_type == 0x86DD) {
+            ip_hdr_len = 40;
+        } else {
+            return -1;
+        }
+
+        const uint8_t *payload = pkt_data + 14 + FRAG_HDR_SIZE + ip_hdr_len;
+        uint32_t payload_len = pkt_len - (14 + FRAG_HDR_SIZE + ip_hdr_len);
+
         entry->pkt_id = pkt_id;
         entry->data_len = payload_len;
         if (payload_len > sizeof(entry->data))
@@ -675,6 +671,10 @@ int frag_try_reassemble_l2(struct frag_table *ft,
     }
 
     if (frag_index == 1) {
+        /* Fragment 1: CHỈ có payload, KHÔNG có IP header */
+        if (pkt_len < 14 + FRAG_HDR_SIZE + 1)
+            return -1;
+
         if (!entry->valid || entry->pkt_id != pkt_id)
             return -1;
 
@@ -682,6 +682,10 @@ int frag_try_reassemble_l2(struct frag_table *ft,
             entry->valid = 0;
             return -1;
         }
+
+        /* Payload bắt đầu ngay sau FRAG_HDR (không có IP header) */
+        const uint8_t *payload = pkt_data + 14 + FRAG_HDR_SIZE;
+        uint32_t payload_len = pkt_len - (14 + FRAG_HDR_SIZE);
 
         uint32_t total_payload = entry->data_len + payload_len;
         uint32_t total_pkt = 14 + entry->ip_hdr_len + total_payload;
@@ -703,7 +707,9 @@ int frag_try_reassemble_l2(struct frag_table *ft,
         memcpy(out_buf + off, payload, payload_len);
         off += payload_len;
 
-        if (ether_type == 0x0800) {
+        /* Lấy ether_type từ entry (đã lưu từ fragment 0) */
+        uint16_t orig_etype = ((uint16_t)entry->eth_hdr[12] << 8) | entry->eth_hdr[13];
+        if (orig_etype == 0x0800) {
             uint16_t ip_total = (uint16_t)(entry->ip_hdr_len + total_payload);
             out_buf[14 + 2] = (uint8_t)(ip_total >> 8);
             out_buf[14 + 3] = (uint8_t)(ip_total & 0xFF);
