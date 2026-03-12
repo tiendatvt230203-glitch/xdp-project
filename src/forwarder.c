@@ -83,6 +83,12 @@ struct queue_thread_args {
     int worker_id;
 };
 
+/* Forward declarations for ring mode threads */
+static void *local_rx_dispatcher_thread(void *arg);
+static void *wan_rx_dispatcher_thread(void *arg);
+static void *local_to_wan_ring_worker(void *arg);
+static void *wan_to_local_ring_worker(void *arg);
+
 static void pin_thread_to_core(int core_id) {
     if (core_id < 0)
         return;
