@@ -418,7 +418,7 @@ int packet_encrypt(struct packet_crypto_ctx *ctx,
 
     switch (g_encrypt_layer) {
     case 2:
-        return crypto_layer2_encrypt(ctx, packet, pkt_len);
+        return crypto_layer2_encrypt_fast(ctx, packet, pkt_len);
     case 3:
         return crypto_layer3_encrypt(ctx, packet, pkt_len);
     case 4:
@@ -435,7 +435,7 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
 
     switch (g_encrypt_layer) {
     case 2:
-        return crypto_layer2_decrypt(ctx, packet, pkt_len);
+        return crypto_layer2_decrypt_fast(ctx, packet, pkt_len);
     case 3:
         return crypto_layer3_decrypt(ctx, packet, pkt_len);
     case 4:

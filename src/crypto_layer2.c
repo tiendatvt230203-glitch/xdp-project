@@ -1,4 +1,5 @@
 #include "../inc/crypto_layer2.h"
+#include "../inc/packet_crypto.h"
 #include <string.h>
 #include <openssl/evp.h>
 
