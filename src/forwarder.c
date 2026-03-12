@@ -355,126 +355,6 @@ static void *wan_queue_thread_no_crypto(void *arg) {
     return NULL;
 }
 
-/* ========================================================================
- * LAYER 2: Hàm riêng cho option mã hóa Layer 2
- * ======================================================================== */
-
-static void *local_queue_thread_l2(void *arg) {
-    struct queue_thread_args *args = (struct queue_thread_args *)arg;
-    struct forwarder *fwd = args->fwd;
-
-    pin_thread_to_core(args->core_id);
-    int local_idx = args->iface_idx;
-    int queue_idx = args->queue_idx;
-    int tx_base = args->tx_queue_base;
-
-    struct xsk_interface *local = &fwd->locals[local_idx];
-    int batch_size = local->batch_size;
-
-    void *pkt_ptrs[MAX_BATCH_SIZE];
-    uint32_t pkt_lens[MAX_BATCH_SIZE];
-    uint64_t addrs[MAX_BATCH_SIZE];
-
-    uint8_t frag1_buf[2048];
-    uint8_t frag2_buf[2048];
-
-    while (running) {
-        int rcvd = interface_recv_single_queue(local, queue_idx,
-                                               pkt_ptrs, pkt_lens, addrs, batch_size);
-        if (rcvd <= 0)
-            continue;
-
-        int wan_used[MAX_INTERFACES] = {0};
-        int wan_tx_q[MAX_INTERFACES];
-        for (int w = 0; w < fwd->wan_count; w++)
-            wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
-
-        for (int i = 0; i < rcvd; i++) {
-            uint32_t src_ip, dst_ip;
-            uint16_t src_port, dst_port;
-            uint8_t protocol;
-
-            int wan_idx;
-            if (parse_flow(pkt_ptrs[i], pkt_lens[i],
-                           &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0) {
-                wan_idx = flow_table_get_wan(&g_flow_table,
-                                             src_ip, dst_ip, src_port, dst_port,
-                                             protocol, pkt_lens[i]);
-            } else {
-                wan_idx = 0;
-            }
-
-            if (wan_idx < 0 || wan_idx >= fwd->wan_count)
-                wan_idx = 0;
-
-            struct xsk_interface *wan = &fwd->wans[wan_idx];
-            int tq = wan_tx_q[wan_idx];
-
-            uint32_t pkt_len = pkt_lens[i];
-            uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
-
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
-
-            if (frag_need_split_l2(pkt_len)) {
-                uint32_t f1_len = 0, f2_len = 0;
-                if (frag_split_and_encrypt_l2(&crypto_ctx,
-                                              pkt, pkt_len,
-                                              frag1_buf, &f1_len,
-                                              frag2_buf, &f2_len) != 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                    continue;
-                }
-
-                memcpy(frag1_buf, wan->dst_mac, 6);
-                memcpy(frag1_buf + 6, wan->src_mac, 6);
-                memcpy(frag2_buf, wan->dst_mac, 6);
-                memcpy(frag2_buf + 6, wan->src_mac, 6);
-
-                uint32_t wire_total = f1_len + f2_len;
-                if (wire_total > pkt_len) {
-                    flow_table_add_bytes(&g_flow_table,
-                                         src_ip, dst_ip, src_port, dst_port,
-                                         protocol, wire_total - pkt_len);
-                }
-
-                if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                    wan_used[wan_idx] = 1;
-                } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                }
-
-                if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                }
-            } else {
-                if (encrypt_packet(pkt_ptrs[i], &pkt_len) != 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                    continue;
-                }
-
-                if (interface_send_batch_queue(wan, tq, pkt_ptrs[i], pkt_len) == 0) {
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                    wan_used[wan_idx] = 1;
-                } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                }
-            }
-        }
-
-        for (int w = 0; w < fwd->wan_count; w++) {
-            if (wan_used[w])
-                interface_send_flush_queue(&fwd->wans[w], wan_tx_q[w]);
-        }
-
-        interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
-    }
-
-    return NULL;
-}
 
 /* ========================================================================
  * LAYER 3/4: Hàm dùng cho L3 và L4 (enqueue to worker)
@@ -549,136 +429,6 @@ static void *local_queue_thread_l3l4(void *arg) {
     return NULL;
 }
 
-/* ========================================================================
- * LAYER 2: wan_queue_thread riêng cho Layer 2 - giải mã + ráp gói + fw
- * ======================================================================== */
-
-static void *wan_queue_thread_l2(void *arg) {
-    struct queue_thread_args *args = (struct queue_thread_args *)arg;
-    struct forwarder *fwd = args->fwd;
-    pin_thread_to_core(args->core_id);
-    int wan_idx = args->iface_idx;
-    int queue_idx = args->queue_idx;
-    int tx_base = args->tx_queue_base;
-
-    struct xsk_interface *wan = &fwd->wans[wan_idx];
-    int batch_size = wan->batch_size;
-
-    void *pkt_ptrs[MAX_BATCH_SIZE];
-    uint32_t pkt_lens[MAX_BATCH_SIZE];
-    uint64_t addrs[MAX_BATCH_SIZE];
-
-    struct frag_table *frag_tbl = calloc(1, sizeof(struct frag_table));
-    if (frag_tbl)
-        frag_table_init(frag_tbl);
-
-    uint8_t reassemble_buf[4096];
-    int gc_counter = 0;
-
-    while (running) {
-        int rcvd = interface_recv_single_queue(wan, queue_idx,
-                                                pkt_ptrs, pkt_lens, addrs, batch_size);
-        if (rcvd <= 0)
-            continue;
-
-        uint32_t local_used_queues[MAX_INTERFACES] = {0};
-
-        for (int i = 0; i < rcvd; i++) {
-            uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
-            uint32_t pkt_len = pkt_lens[i];
-            uint8_t *final_pkt = pkt;
-            uint32_t final_len = pkt_len;
-
-            /* L2 decrypt */
-            if (decrypt_packet(pkt, &pkt_len) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                continue;
-            }
-            final_pkt = pkt;
-            final_len = pkt_len;
-
-            /* L2 reassembly nếu là fragment */
-            if (frag_tbl) {
-                uint16_t l2_pkt_id;
-                uint8_t l2_frag_index;
-                if (frag_is_fragment_l2(pkt, pkt_len, &l2_pkt_id, &l2_frag_index)) {
-                    uint32_t reasm_len = 0;
-                    int ret = frag_try_reassemble_l2(frag_tbl, pkt, pkt_len,
-                                                    l2_pkt_id, l2_frag_index,
-                                                    reassemble_buf, &reasm_len);
-                    if (ret == 0) {
-                        continue;
-                    } else if (ret == 1) {
-                        final_pkt = reassemble_buf;
-                        final_len = reasm_len;
-                    } else {
-                        __sync_fetch_and_add(&fwd->total_dropped, 1);
-                        continue;
-                    }
-                }
-            }
-
-            /* Forward to local */
-            uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
-            if (dest_ip == 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_bad_ip, 1);
-                continue;
-            }
-
-            int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
-            if (local_idx < 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
-                continue;
-            }
-
-            struct xsk_interface *local_iface = &fwd->locals[local_idx];
-            struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
-            int nq = local_iface->queue_count;
-            if (nq <= 0) nq = 1;
-
-            int tq;
-            {
-                uint32_t src_ip, dst_ip;
-                uint16_t src_port, dst_port;
-                uint8_t protocol;
-                if (parse_flow(final_pkt, final_len, &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0)
-                    tq = (int)(flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol) % (uint32_t)nq);
-                else
-                    tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
-            }
-
-            memcpy(final_pkt, local_cfg->dst_mac, 6);
-            memcpy(final_pkt + 6, local_iface->src_mac, 6);
-
-            if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg, final_pkt, final_len) == 0) {
-                __sync_fetch_and_add(&fwd->wan_to_local, 1);
-                if (tq < 32)
-                    local_used_queues[local_idx] |= (1u << tq);
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_local_tx_fail, 1);
-            }
-        }
-
-        for (int l = 0; l < fwd->local_count; l++) {
-            for (int q = 0; q < fwd->locals[l].queue_count && q < 32; q++)
-                if (local_used_queues[l] & (1u << q))
-                    interface_send_to_local_flush_queue(&fwd->locals[l], q);
-        }
-
-        interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
-
-        if (frag_tbl && ++gc_counter >= 1000) {
-            frag_table_gc(frag_tbl);
-            gc_counter = 0;
-        }
-    }
-
-    if (frag_tbl) free(frag_tbl);
-    return NULL;
-}
 
 /* ========================================================================
  * LAYER 3/4: wan_queue_thread cho Layer 3 và 4
@@ -1191,78 +941,6 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
 
 /* LAYER2: Local->WAN trên core 0-3 (rã gói + mã hóa + fw),
  *         WAN->Local trên core 4-7 (giải mã + ráp gói + fw) */
-static void forwarder_run_l2(struct forwarder *fwd) {
-    int total_local_queues = 0;
-    for (int i = 0; i < fwd->local_count; i++)
-        total_local_queues += fwd->locals[i].queue_count;
-
-    int total_wan_queues = 0;
-    for (int i = 0; i < fwd->wan_count; i++)
-        total_wan_queues += fwd->wans[i].queue_count;
-
-    /* L2: mỗi thread tự xử lý full pipeline */
-    int total_threads = total_local_queues + total_wan_queues;
-
-    pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
-    struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
-    if (!threads || !args) {
-        fprintf(stderr, "[L2] Failed to allocate thread arrays\n");
-        free(threads); free(args);
-        return;
-    }
-
-    pthread_t gc_tid;
-    pthread_create(&gc_tid, NULL, gc_thread, NULL);
-
-    int thread_idx = 0;
-
-    /* Local->WAN: core 0-3, dùng hàm L2 riêng */
-    int local_rx_idx = 0;
-    for (int i = 0; i < fwd->local_count; i++) {
-        struct xsk_interface *local = &fwd->locals[i];
-        for (int q = 0; q < local->queue_count; q++) {
-            args[thread_idx].fwd = fwd;
-            args[thread_idx].iface_idx = i;
-            args[thread_idx].queue_idx = q;
-            args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4; /* core 0,1,2,3 */
-            args[thread_idx].wan_worker_index = -1;
-            args[thread_idx].worker_id = -1;
-            pthread_create(&threads[thread_idx], NULL, local_queue_thread_l2, &args[thread_idx]);
-            thread_idx++;
-            local_rx_idx++;
-        }
-    }
-
-    /* WAN->Local: core 4-7, dùng hàm L2 riêng */
-    int wan_worker_idx = 0;
-    for (int i = 0; i < fwd->wan_count; i++) {
-        struct xsk_interface *wan = &fwd->wans[i];
-        for (int q = 0; q < wan->queue_count; q++) {
-            args[thread_idx].fwd = fwd;
-            args[thread_idx].iface_idx = i;
-            args[thread_idx].queue_idx = q;
-            args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 4 + (wan_worker_idx % 4); /* core 4,5,6,7 */
-            args[thread_idx].wan_worker_index = wan_worker_idx;
-            args[thread_idx].worker_id = -1;
-            pthread_create(&threads[thread_idx], NULL, wan_queue_thread_l2, &args[thread_idx]);
-            wan_worker_idx++;
-            thread_idx++;
-        }
-    }
-
-    while (running)
-        sleep(1);
-
-    for (int i = 0; i < total_threads; i++)
-        pthread_join(threads[i], NULL);
-    pthread_join(gc_tid, NULL);
-
-    free(threads);
-    free(args);
-}
-
 /* LAYER3: Local->WAN trên core 0-3 (RX) + core 4-7 (worker crypto/fw),
  *         WAN->Local trên core 8-11 */
 static void forwarder_run_l3(struct forwarder *fwd) {
@@ -1568,8 +1246,24 @@ static void *local_rx_dispatcher_thread(void *arg) {
 }
 
 /* -------- WAN RX DISPATCHER: Thu gói từ WAN, đẩy vào 5 ring -------- */
-/* Round-robin counter cho WAN→Local (gói tin đã mã hóa không có IP để hash) */
-static volatile uint32_t g_wan_rr_counter = 0;
+/* Hash dựa trên source MAC để 2 mảnh fragment cùng nguồn vào cùng ring */
+static inline uint32_t wan_source_hash(const uint8_t *pkt, uint32_t len) {
+    if (len < 14) return 0;
+    
+    /* Hash source MAC (bytes 6-11) - 2 mảnh cùng nguồn = cùng ring */
+    uint32_t h = 0;
+    h ^= *(uint32_t *)(pkt + 6);      /* 4 bytes đầu src MAC */
+    h ^= (uint32_t)(*(uint16_t *)(pkt + 10)) << 16;  /* 2 bytes cuối src MAC */
+    
+    /* MurmurHash finalizer */
+    h ^= (h >> 16);
+    h *= 0x85ebca6b;
+    h ^= (h >> 13);
+    h *= 0xc2b2ae35;
+    h ^= (h >> 16);
+    
+    return h;
+}
 
 static void *wan_rx_dispatcher_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
@@ -1585,9 +1279,7 @@ static void *wan_rx_dispatcher_thread(void *arg) {
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
     
-    /* Gói tin từ WAN đã được mã hóa (Layer 2), không có IP header rõ ràng.
-     * Dùng round-robin để phân bố đều ra 5 workers. */
-    int is_encrypted = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
+    int is_encrypted = crypto_enabled && crypto_layer == 2;
     
     while (running) {
         int rcvd = interface_recv_single_queue(wan, queue_idx,
@@ -1598,15 +1290,15 @@ static void *wan_rx_dispatcher_thread(void *arg) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
             uint32_t len = pkt_lens[i];
             
-            int target;
+            uint32_t hash;
             if (is_encrypted) {
-                /* Round-robin cho gói tin mã hóa */
-                target = __sync_fetch_and_add(&g_wan_rr_counter, 1) % NUM_RING_WORKERS;
+                /* Hash source MAC - đảm bảo 2 mảnh fragment cùng nguồn vào cùng ring */
+                hash = wan_source_hash(pkt, len);
             } else {
                 /* Flow hash cho gói tin không mã hóa */
-                uint32_t hash = ring_flow_hash(pkt, len);
-                target = hash % NUM_RING_WORKERS;
+                hash = ring_flow_hash(pkt, len);
             }
+            int target = hash % NUM_RING_WORKERS;
             
             if (ring_enqueue(&g_wan_to_local_rings[target], pkt, len, wan_idx, queue_idx) != 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
@@ -1632,8 +1324,8 @@ static void *local_to_wan_ring_worker(void *arg) {
     uint8_t frag1_buf[2048];
     uint8_t frag2_buf[2048];
     
-    /* Ring mode dùng Layer 2 encryption (crypto_layer == 22 hoặc 2) */
-    int is_l2_crypto = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
+    /* Layer 2 encryption */
+    int is_l2_crypto = crypto_enabled && crypto_layer == 2;
     
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
@@ -1723,8 +1415,8 @@ static void *wan_to_local_ring_worker(void *arg) {
     struct sw_ring *ring = &g_wan_to_local_rings[worker_id];
     struct ring_packet pkt;
     
-    /* Ring mode dùng Layer 2 encryption (crypto_layer == 22 hoặc 2) */
-    int is_l2_crypto = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
+    /* Layer 2 encryption */
+    int is_l2_crypto = crypto_enabled && crypto_layer == 2;
     
     struct frag_table *frag_tbl = NULL;
     if (is_l2_crypto) {
@@ -1928,16 +1620,13 @@ void forwarder_run(struct forwarder *fwd) {
     if (!crypto_enabled) {
         forwarder_run_no_crypto(fwd);
     } else if (crypto_layer == 2) {
-        forwarder_run_l2(fwd);
+        /* Layer 2: Software ring buffer, 5 core mỗi chiều */
+        fprintf(stderr, "[FORWARDER] Layer 2 with Software Ring (5 cores per direction)\n");
+        forwarder_run_ring_mode(fwd);
     } else if (crypto_layer == 3) {
         forwarder_run_l3(fwd);
     } else if (crypto_layer == 4) {
         forwarder_run_l4(fwd);
-    } else if (crypto_layer == 22) {
-        /* RING MODE: Layer 2 với software ring buffer
-         * Không phụ thuộc số queue NIC, scale tự do */
-        fprintf(stderr, "[FORWARDER] Using RING MODE (Layer 2 + Software Ring)\n");
-        forwarder_run_ring_mode(fwd);
     } else {
         /* Fallback: dùng L3-style */
         forwarder_run_l3(fwd);
