@@ -79,6 +79,10 @@ int main(int argc, char **argv) {
 
     if (!db_url) return 1;
 
+    if (cpu_core >= 0) {
+        pin_to_cpu_core(cpu_core);
+    }
+
     libbpf_set_print(libbpf_print_silent);
 
     PGconn *listen_conn = PQconnectdb(db_url);

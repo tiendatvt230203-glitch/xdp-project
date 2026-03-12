@@ -1097,9 +1097,8 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
     struct xsk_queue *queue = &iface->queues[queue_idx];
     uint32_t idx;
     struct ether_header *eth;
-    int ret = 0;
 
-#define LOCAL_TX_MAX_WAIT_LOOPS  10000  /* ~2s max then drop pkt to avoid blocking WAN drain */
+#define LOCAL_TX_MAX_WAIT_LOOPS  10000
 
     pthread_mutex_lock(&queue->tx_lock);
 
@@ -1158,7 +1157,6 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
         queue->pending_tx_count = 0;
     }
 
-unlock:
     pthread_mutex_unlock(&queue->tx_lock);
     return 0;
 }
