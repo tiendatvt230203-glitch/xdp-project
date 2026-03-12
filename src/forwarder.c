@@ -1568,6 +1568,9 @@ static void *local_rx_dispatcher_thread(void *arg) {
 }
 
 /* -------- WAN RX DISPATCHER: Thu gói từ WAN, đẩy vào 5 ring -------- */
+/* Round-robin counter cho WAN→Local (gói tin đã mã hóa không có IP để hash) */
+static volatile uint32_t g_wan_rr_counter = 0;
+
 static void *wan_rx_dispatcher_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
@@ -1582,6 +1585,10 @@ static void *wan_rx_dispatcher_thread(void *arg) {
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
     
+    /* Gói tin từ WAN đã được mã hóa (Layer 2), không có IP header rõ ràng.
+     * Dùng round-robin để phân bố đều ra 5 workers. */
+    int is_encrypted = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
+    
     while (running) {
         int rcvd = interface_recv_single_queue(wan, queue_idx,
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
@@ -1591,9 +1598,15 @@ static void *wan_rx_dispatcher_thread(void *arg) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
             uint32_t len = pkt_lens[i];
             
-            /* Flow hash để chọn worker */
-            uint32_t hash = ring_flow_hash(pkt, len);
-            int target = hash % NUM_RING_WORKERS;
+            int target;
+            if (is_encrypted) {
+                /* Round-robin cho gói tin mã hóa */
+                target = __sync_fetch_and_add(&g_wan_rr_counter, 1) % NUM_RING_WORKERS;
+            } else {
+                /* Flow hash cho gói tin không mã hóa */
+                uint32_t hash = ring_flow_hash(pkt, len);
+                target = hash % NUM_RING_WORKERS;
+            }
             
             if (ring_enqueue(&g_wan_to_local_rings[target], pkt, len, wan_idx, queue_idx) != 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
@@ -1618,6 +1631,9 @@ static void *local_to_wan_ring_worker(void *arg) {
     
     uint8_t frag1_buf[2048];
     uint8_t frag2_buf[2048];
+    
+    /* Ring mode dùng Layer 2 encryption (crypto_layer == 22 hoặc 2) */
+    int is_l2_crypto = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
     
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
@@ -1655,7 +1671,7 @@ static void *local_to_wan_ring_worker(void *arg) {
         memcpy(data, wan->dst_mac, 6);
         memcpy(data + 6, wan->src_mac, 6);
         
-        if (crypto_enabled && crypto_layer == 2) {
+        if (is_l2_crypto) {
             /* Layer 2: rã gói nếu cần + mã hóa */
             if (frag_need_split_l2(len)) {
                 uint32_t f1_len = 0, f2_len = 0;
@@ -1707,8 +1723,11 @@ static void *wan_to_local_ring_worker(void *arg) {
     struct sw_ring *ring = &g_wan_to_local_rings[worker_id];
     struct ring_packet pkt;
     
+    /* Ring mode dùng Layer 2 encryption (crypto_layer == 22 hoặc 2) */
+    int is_l2_crypto = crypto_enabled && (crypto_layer == 2 || crypto_layer == 22);
+    
     struct frag_table *frag_tbl = NULL;
-    if (crypto_enabled && crypto_layer == 2) {
+    if (is_l2_crypto) {
         frag_tbl = calloc(1, sizeof(struct frag_table));
         if (frag_tbl) frag_table_init(frag_tbl);
     }
@@ -1727,7 +1746,7 @@ static void *wan_to_local_ring_worker(void *arg) {
         uint8_t *final_pkt = data;
         uint32_t final_len = len;
         
-        if (crypto_enabled && crypto_layer == 2) {
+        if (is_l2_crypto) {
             /* Giải mã L2 */
             if (decrypt_packet(data, &len) != 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
