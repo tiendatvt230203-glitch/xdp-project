@@ -1553,31 +1553,33 @@ static void forwarder_run_ring_mode(struct forwarder *fwd) {
     
     int thread_idx = 0;
     
-    /* Local RX dispatchers - không cần core riêng, chia sẻ với worker */
-    int dispatcher_core = 10; /* Core 10-11 cho dispatchers */
+    /* Local RX dispatchers - chia đều trên core 0-4 (chia sẻ với Local→WAN workers) */
+    int local_disp_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
         for (int q = 0; q < local->queue_count; q++) {
             args[thread_idx].fwd = fwd;
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
-            args[thread_idx].core_id = dispatcher_core;
+            args[thread_idx].core_id = local_disp_idx % NUM_RING_WORKERS; /* Core 0-4 */
             pthread_create(&threads[thread_idx], NULL, local_rx_dispatcher_thread, &args[thread_idx]);
             thread_idx++;
+            local_disp_idx++;
         }
     }
     
-    /* WAN RX dispatchers */
-    dispatcher_core = 11;
+    /* WAN RX dispatchers - chia đều trên core 5-9 (chia sẻ với WAN→Local workers) */
+    int wan_disp_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
         for (int q = 0; q < wan->queue_count; q++) {
             args[thread_idx].fwd = fwd;
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
-            args[thread_idx].core_id = dispatcher_core;
+            args[thread_idx].core_id = 5 + (wan_disp_idx % NUM_RING_WORKERS); /* Core 5-9 */
             pthread_create(&threads[thread_idx], NULL, wan_rx_dispatcher_thread, &args[thread_idx]);
             thread_idx++;
+            wan_disp_idx++;
         }
     }
     
