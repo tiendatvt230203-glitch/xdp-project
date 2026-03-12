@@ -1390,8 +1390,8 @@ static void *local_to_wan_ring_worker(void *arg) {
     
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
-            /* Ring empty, spin wait */
-            for (volatile int i = 0; i < 100; i++);
+            /* Ring empty, yield CPU */
+            usleep(1);
             continue;
         }
         
@@ -1496,7 +1496,8 @@ static void *wan_to_local_ring_worker(void *arg) {
     
     while (running) {
         if (ring_dequeue(ring, &pkt) != 0) {
-            for (volatile int i = 0; i < 100; i++);
+            /* Ring empty, yield CPU */
+            usleep(1);
             continue;
         }
         
