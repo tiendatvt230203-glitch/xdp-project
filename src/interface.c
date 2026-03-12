@@ -1141,7 +1141,7 @@ int interface_send_packets_queue(struct xsk_interface *iface, int queue_idx,
     /* Copy packet 1 */
     uint64_t addr1 = ((queue->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
     queue->tx_slot++;
-    void *tx_ptr1 = xsk_umem__get_data(queue->umem_area, addr1);
+    void *tx_ptr1 = (uint8_t *)queue->bufs + addr1;
     memcpy(tx_ptr1, pkt1_data, pkt1_len);
 
     struct xdp_desc *desc1 = xsk_ring_prod__tx_desc(&queue->tx, idx);
@@ -1152,7 +1152,7 @@ int interface_send_packets_queue(struct xsk_interface *iface, int queue_idx,
     if (num_pkts == 2) {
         uint64_t addr2 = ((queue->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
         queue->tx_slot++;
-        void *tx_ptr2 = xsk_umem__get_data(queue->umem_area, addr2);
+        void *tx_ptr2 = (uint8_t *)queue->bufs + addr2;
         memcpy(tx_ptr2, pkt2_data, pkt2_len);
 
         struct xdp_desc *desc2 = xsk_ring_prod__tx_desc(&queue->tx, idx + 1);

@@ -25,7 +25,7 @@ static void print_usage(const char *prog) {
     printf("  --cpu-core <N>   pin daemon process to core N\n");
 }
 
-static int pin_to_cpu_core(int cpu_core) {
+__attribute__((unused)) static int pin_to_cpu_core(int cpu_core) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_core, &cpuset);
