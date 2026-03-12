@@ -1171,32 +1171,45 @@ static inline int ring_enqueue(struct sw_ring *ring, const uint8_t *pkt, uint32_
                                int iface_idx, int queue_idx) {
     pthread_spin_lock(&ring->lock);
     
-    uint32_t next_tail = (ring->tail + 1) % SW_RING_SIZE;
+    uint32_t tail = ring->tail;
+    uint32_t next_tail = (tail + 1) % SW_RING_SIZE;
     if (next_tail == ring->head) {
         pthread_spin_unlock(&ring->lock);
         return -1; /* Ring full */
     }
     
-    struct ring_packet *slot = &ring->packets[ring->tail];
+    struct ring_packet *slot = &ring->packets[tail];
     if (len > sizeof(slot->data)) len = sizeof(slot->data);
     memcpy(slot->data, pkt, len);
     slot->len = len;
     slot->src_iface_idx = iface_idx;
     slot->src_queue_idx = queue_idx;
     
+    /* Memory barrier đảm bảo data được ghi trước khi update tail */
+    __sync_synchronize();
     ring->tail = next_tail;
+    
     pthread_spin_unlock(&ring->lock);
     return 0;
 }
 
-/* Helper: Dequeue packet từ ring (single consumer, không cần lock) */
+/* Helper: Dequeue packet từ ring (single consumer, cần memory barrier) */
 static inline int ring_dequeue(struct sw_ring *ring, struct ring_packet *out) {
-    if (ring->head == ring->tail) {
+    /* Memory barrier để đảm bảo thấy tail mới nhất từ producer */
+    __sync_synchronize();
+    
+    uint32_t head = ring->head;
+    uint32_t tail = ring->tail;
+    
+    if (head == tail) {
         return -1; /* Ring empty */
     }
     
-    *out = ring->packets[ring->head];
-    ring->head = (ring->head + 1) % SW_RING_SIZE;
+    *out = ring->packets[head];
+    
+    /* Memory barrier trước khi update head */
+    __sync_synchronize();
+    ring->head = (head + 1) % SW_RING_SIZE;
     return 0;
 }
 
