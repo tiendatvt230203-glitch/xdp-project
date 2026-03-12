@@ -571,7 +571,7 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
             frag1[14 + FRAG_HDR_SIZE + 5] = (uint8_t)(ipv6_paylen & 0xFF);
         }
 
-        int enc_len = crypto_layer2_encrypt_fast(ctx, frag1, off);
+        int enc_len = crypto_layer2_encrypt(ctx, frag1, off);
         if (enc_len < 0) return -1;
         *frag1_len = (uint32_t)enc_len;
     }
@@ -591,7 +591,7 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
 
         /* Không cần tính checksum vì không có IP header */
 
-        int enc_len = crypto_layer2_encrypt_fast(ctx, frag2, off);
+        int enc_len = crypto_layer2_encrypt(ctx, frag2, off);
         if (enc_len < 0) return -1;
         *frag2_len = (uint32_t)enc_len;
     }

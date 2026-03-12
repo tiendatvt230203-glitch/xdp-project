@@ -25,7 +25,7 @@ static void print_usage(const char *prog) {
     printf("  --cpu-core <N>   pin daemon process to core N\n");
 }
 
-__attribute__((unused)) static int pin_to_cpu_core(int cpu_core) {
+static int pin_to_cpu_core(int cpu_core) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_core, &cpuset);
@@ -79,10 +79,6 @@ int main(int argc, char **argv) {
 
     if (!db_url) return 1;
 
-    if (cpu_core >= 0) {
-        pin_to_cpu_core(cpu_core);
-    }
-
     libbpf_set_print(libbpf_print_silent);
 
     PGconn *listen_conn = PQconnectdb(db_url);
@@ -104,7 +100,6 @@ int main(int argc, char **argv) {
         if (forwarder_init(&fwd, &cfg) != 0) continue;
 
         forwarder_run(&fwd);
-        forwarder_print_stats(&fwd);
         forwarder_cleanup(&fwd);
     }
 

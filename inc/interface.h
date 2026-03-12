@@ -105,12 +105,6 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
 int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
                                 void *pkt_data, uint32_t pkt_len);
 
-/* Gửi 1 hoặc 2 packets linh hoạt (cho cả gói thường và fragments)
- * pkt2_data = NULL, pkt2_len = 0 → chỉ gửi 1 packet */
-int interface_send_packets_queue(struct xsk_interface *iface, int queue_idx,
-                                  void *pkt1_data, uint32_t pkt1_len,
-                                  void *pkt2_data, uint32_t pkt2_len);
-
 int interface_send_to_local_batch_queue(struct xsk_interface *iface,
                                          int queue_idx,
                                          const struct local_config *local_cfg,
