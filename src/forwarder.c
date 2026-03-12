@@ -1,5 +1,6 @@
 #include "../inc/forwarder.h"
 #include "../inc/packet_crypto.h"
+#include "../inc/crypto_layer2.h"
 #include "../inc/flow_table.h"
 #include "../inc/fragment.h"
 #include "../inc/config.h"
@@ -1576,7 +1577,7 @@ static void *wan_to_local_ring_worker(void *arg) {
  * - WAN→Local: Mỗi queue 1 thread, shared fragment table với lock
  * ======================================================================== */
 
-/* Local→WAN thread: Nhận → Mã hóa → Rã nếu cần → Gửi */
+/* Local→WAN thread: TỐI ƯU - chỉ mã hóa, không check gì */
 static void *l2_local_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
@@ -1584,102 +1585,50 @@ static void *l2_local_thread(void *arg) {
     
     int local_idx = args->iface_idx;
     int queue_idx = args->queue_idx;
-    int tx_base = args->tx_queue_base;
     
     struct xsk_interface *local = &fwd->locals[local_idx];
+    struct xsk_interface *wan = &fwd->wans[0]; /* Luôn dùng WAN đầu tiên */
+    int tx_q = queue_idx % wan->queue_count;
     int batch_size = local->batch_size;
     
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
     
-    uint8_t frag1_buf[2048];
-    uint8_t frag2_buf[2048];
-    
-    fprintf(stderr, "[L2_LOCAL] Started: local=%d queue=%d core=%d\n", 
-            local_idx, queue_idx, args->core_id);
+    fprintf(stderr, "[L2_LOCAL] Started: local=%d queue=%d core=%d tx_q=%d\n", 
+            local_idx, queue_idx, args->core_id, tx_q);
     
     while (running) {
         int rcvd = interface_recv_single_queue(local, queue_idx,
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0) continue;
         
-        int wan_used[MAX_INTERFACES] = {0};
-        int wan_tx_q[MAX_INTERFACES];
-        for (int w = 0; w < fwd->wan_count; w++)
-            wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
-        
         for (int i = 0; i < rcvd; i++) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
             uint32_t pkt_len = pkt_lens[i];
             
-            /* Parse flow để chọn WAN */
-            uint32_t src_ip, dst_ip;
-            uint16_t src_port, dst_port;
-            uint8_t protocol;
-            int wan_idx = 0;
+            /* Set MAC - inline */
+            *(uint32_t *)pkt = *(uint32_t *)wan->dst_mac;
+            *(uint16_t *)(pkt + 4) = *(uint16_t *)(wan->dst_mac + 4);
+            *(uint32_t *)(pkt + 6) = *(uint32_t *)wan->src_mac;
+            *(uint16_t *)(pkt + 10) = *(uint16_t *)(wan->src_mac + 4);
             
-            if (parse_flow(pkt, pkt_len, &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0) {
-                wan_idx = flow_table_get_wan(&g_flow_table, src_ip, dst_ip, 
-                                             src_port, dst_port, protocol, pkt_len);
-            }
-            if (wan_idx < 0 || wan_idx >= fwd->wan_count) wan_idx = 0;
-            
-            struct xsk_interface *wan = &fwd->wans[wan_idx];
-            int tq = wan_tx_q[wan_idx];
-            
-            /* Set MAC */
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
-            
-            /* Kiểm tra cần rã gói không */
-            if (frag_need_split_l2(pkt_len)) {
-                uint32_t f1_len = 0, f2_len = 0;
-                if (frag_split_and_encrypt_l2(&crypto_ctx, pkt, pkt_len,
-                                              frag1_buf, &f1_len,
-                                              frag2_buf, &f2_len) != 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                    continue;
-                }
-                memcpy(frag1_buf, wan->dst_mac, 6);
-                memcpy(frag1_buf + 6, wan->src_mac, 6);
-                memcpy(frag2_buf, wan->dst_mac, 6);
-                memcpy(frag2_buf + 6, wan->src_mac, 6);
-                
-                /* Gửi 2 fragments */
-                if (interface_send_packets_queue(wan, tq, frag1_buf, f1_len, frag2_buf, f2_len) == 0) {
-                    __sync_fetch_and_add(&fwd->local_to_wan, 2);
-                    wan_used[wan_idx] = 1;
-                } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 2);
-                }
-            } else {
-                /* Mã hóa bình thường */
-                if (encrypt_packet(pkt, &pkt_len) != 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                    continue;
-                }
-                if (interface_send_batch_queue(wan, tq, pkt, pkt_len) == 0) {
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                    wan_used[wan_idx] = 1;
-                } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                }
+            /* Mã hóa fast - không check */
+            int new_len = crypto_layer2_encrypt_fast(&crypto_ctx, pkt, pkt_len);
+            if (__builtin_expect(new_len > 0, 1)) {
+                interface_send_batch_queue(wan, tx_q, pkt, (uint32_t)new_len);
+                __sync_fetch_and_add(&fwd->local_to_wan, 1);
             }
         }
         
-        for (int w = 0; w < fwd->wan_count; w++) {
-            if (wan_used[w])
-                interface_send_flush_queue(&fwd->wans[w], wan_tx_q[w]);
-        }
-        
+        interface_send_flush_queue(wan, tx_q);
         interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
     }
     
     return NULL;
 }
 
-/* WAN→Local thread: Nhận → Giải mã → Ráp (shared table) → Gửi */
+/* WAN→Local thread: TỐI ƯU - chỉ giải mã, không check gì */
 static void *l2_wan_thread(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
@@ -1687,96 +1636,38 @@ static void *l2_wan_thread(void *arg) {
     
     int wan_idx = args->iface_idx;
     int queue_idx = args->queue_idx;
-    int tx_base = args->tx_queue_base;
     
     struct xsk_interface *wan = &fwd->wans[wan_idx];
+    struct xsk_interface *local = &fwd->locals[0]; /* Luôn dùng local đầu tiên */
+    struct local_config *local_cfg = &fwd->cfg->locals[0];
+    int tx_q = queue_idx % local->queue_count;
     int batch_size = wan->batch_size;
     
     void *pkt_ptrs[MAX_BATCH_SIZE];
     uint32_t pkt_lens[MAX_BATCH_SIZE];
     uint64_t addrs[MAX_BATCH_SIZE];
     
-    uint8_t reassemble_buf[4096];
-    
-    fprintf(stderr, "[L2_WAN] Started: wan=%d queue=%d core=%d\n", 
-            wan_idx, queue_idx, args->core_id);
+    fprintf(stderr, "[L2_WAN] Started: wan=%d queue=%d core=%d tx_q=%d\n", 
+            wan_idx, queue_idx, args->core_id, tx_q);
     
     while (running) {
         int rcvd = interface_recv_single_queue(wan, queue_idx,
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0) continue;
         
-        uint32_t local_used[MAX_INTERFACES] = {0};
-        
         for (int i = 0; i < rcvd; i++) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
             uint32_t pkt_len = pkt_lens[i];
-            uint8_t *final_pkt = pkt;
-            uint32_t final_len = pkt_len;
             
-            /* Giải mã */
-            if (decrypt_packet(pkt, &pkt_len) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                continue;
-            }
-            final_pkt = pkt;
-            final_len = pkt_len;
-            
-            /* Kiểm tra fragment và ráp với shared table */
-            uint16_t l2_pkt_id;
-            uint8_t l2_frag_index;
-            if (frag_is_fragment_l2(pkt, pkt_len, &l2_pkt_id, &l2_frag_index)) {
-                uint32_t reasm_len = 0;
-                int ret;
-                
-                /* Lock shared table */
-                pthread_spin_lock(&g_frag_table_lock);
-                ret = frag_try_reassemble_l2(g_shared_frag_table, pkt, pkt_len,
-                                             l2_pkt_id, l2_frag_index,
-                                             reassemble_buf, &reasm_len);
-                pthread_spin_unlock(&g_frag_table_lock);
-                
-                if (ret == 0) continue; /* Đợi fragment còn lại */
-                if (ret < 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
-                    continue;
-                }
-                final_pkt = reassemble_buf;
-                final_len = reasm_len;
-            }
-            
-            /* Tìm local interface */
-            uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
-            if (dest_ip == 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                continue;
-            }
-            
-            int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
-            if (local_idx < 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                continue;
-            }
-            
-            struct xsk_interface *local_iface = &fwd->locals[local_idx];
-            struct local_config *local_cfg = &fwd->cfg->locals[local_idx];
-            int nq = local_iface->queue_count > 0 ? local_iface->queue_count : 1;
-            int tq = tx_base % nq;
-            
-            if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg, 
-                                                    final_pkt, final_len) == 0) {
+            /* Giải mã fast - không check */
+            int new_len = crypto_layer2_decrypt_fast(&crypto_ctx, pkt, pkt_len);
+            if (__builtin_expect(new_len > 0, 1)) {
+                interface_send_to_local_batch_queue(local, tx_q, local_cfg, pkt, (uint32_t)new_len);
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);
-                local_used[local_idx] = 1;
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
             }
         }
         
-        for (int l = 0; l < fwd->local_count; l++) {
-            if (local_used[l])
-                interface_send_to_local_flush_queue(&fwd->locals[l], tx_base % fwd->locals[l].queue_count);
-        }
-        
+        interface_send_to_local_flush_queue(local, tx_q);
         interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
     }
     
@@ -1797,6 +1688,12 @@ static void forwarder_run_l2_hybrid(struct forwarder *fwd) {
     
     fprintf(stderr, "[L2 HYBRID] local_queues=%d, wan_queues=%d, total=%d\n",
             total_local_queues, total_wan_queues, total_threads);
+    
+    /* Init FAST crypto - 1 key, không check */
+    int nonce_size = packet_crypto_get_nonce_size();
+    uint16_t fake_etype = packet_crypto_get_fake_ethertype_ipv4();
+    crypto_layer2_fast_init(&crypto_ctx, nonce_size, fake_etype);
+    fprintf(stderr, "[L2 HYBRID] Fast crypto initialized: nonce=%d\n", nonce_size);
     
     /* Init shared fragment table */
     g_shared_frag_table = calloc(1, sizeof(struct frag_table));

@@ -9,6 +9,89 @@
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
+/* ========================================================================
+ * ULTRA FAST VERSION: Đơn giản nhất có thể
+ * - 1 key duy nhất
+ * - Không check gì hết
+ * - Chỉ mã hóa/giải mã và forward
+ * ======================================================================== */
+
+/* Thread-local counter */
+static __thread uint32_t tls_counter = 0;
+
+/* Cache config để không gọi function mỗi packet */
+static int g_fast_nonce_size = 12;
+static int g_fast_enc_start = 25;  /* 13 + 12 */
+static uint8_t g_fast_marker = 0;
+static const uint8_t *g_fast_key = NULL;
+
+void crypto_layer2_fast_init(struct packet_crypto_ctx *ctx, int nonce_size, uint16_t fake_etype) {
+    g_fast_nonce_size = nonce_size;
+    g_fast_enc_start = 13 + nonce_size;
+    g_fast_marker = (uint8_t)(fake_etype >> 8);
+    g_fast_key = ctx->keys[KEY_SLOT_CURRENT];
+}
+
+/* Encrypt: Nhận packet → mã hóa → trả về length mới */
+int crypto_layer2_encrypt_fast(struct packet_crypto_ctx *ctx, uint8_t *pkt, size_t len) {
+    (void)ctx; /* Dùng cached key */
+    
+    const size_t payload_len = len - 14;
+    const int enc_start = g_fast_enc_start;
+    
+    /* Nonce = counter (4 bytes) + zeros */
+    uint8_t nonce[16] = {0};
+    uint32_t cnt = tls_counter++;
+    nonce[0] = cnt >> 24;
+    nonce[1] = cnt >> 16;
+    nonce[2] = cnt >> 8;
+    nonce[3] = cnt;
+    
+    /* Move payload */
+    memmove(pkt + enc_start, pkt + 14, payload_len);
+    
+    /* Write marker + nonce */
+    pkt[12] = g_fast_marker;
+    *(uint32_t *)(pkt + 13) = *(uint32_t *)nonce;
+    if (g_fast_nonce_size > 4)
+        memset(pkt + 17, 0, g_fast_nonce_size - 4);
+    
+    /* Encrypt + tag */
+    uint8_t tag[16];
+    crypto_aes_gcm_encrypt(g_fast_key, nonce, g_fast_nonce_size,
+                           pkt + enc_start, (int)payload_len, tag);
+    
+    memcpy(pkt + enc_start + payload_len, tag, 16);
+    
+    return (int)(len + g_fast_nonce_size - 1 + 16);
+}
+
+/* Decrypt: Nhận packet → giải mã → trả về length mới */
+int crypto_layer2_decrypt_fast(struct packet_crypto_ctx *ctx, uint8_t *pkt, size_t len) {
+    (void)ctx;
+    
+    const int enc_start = g_fast_enc_start;
+    const size_t enc_len = len - enc_start - 16;
+    
+    /* Read nonce */
+    uint8_t nonce[16] = {0};
+    memcpy(nonce, pkt + 13, g_fast_nonce_size);
+    
+    /* Decrypt */
+    uint8_t tag[16];
+    memcpy(tag, pkt + enc_start + enc_len, 16);
+    crypto_aes_gcm_decrypt(g_fast_key, nonce, g_fast_nonce_size,
+                           pkt + enc_start, (int)enc_len, tag);
+    
+    /* Restore ethertype và move */
+    uint8_t *data = pkt + enc_start;
+    pkt[12] = data[0];
+    pkt[13] = data[1];
+    memmove(pkt + 14, data + 2, enc_len - 2);
+    
+    return (int)(14 + enc_len - 2);
+}
+
 /* Inline verify functions - chỉ dùng cho CTR mode */
 static inline __attribute__((always_inline))
 int verify_ipv4_after_decrypt(const uint8_t *ip_payload, size_t len) {
