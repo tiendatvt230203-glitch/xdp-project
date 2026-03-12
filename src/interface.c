@@ -1087,6 +1087,96 @@ void interface_send_flush_queue(struct xsk_interface *iface, int queue_idx) {
     pthread_mutex_unlock(&queue->tx_lock);
 }
 
+/* Gửi 2 packets atomic (fragments) hoặc 1 packet linh hoạt
+ * pkt2_data = NULL, pkt2_len = 0 → chỉ gửi 1 packet */
+int interface_send_packets_queue(struct xsk_interface *iface, int queue_idx,
+                                  void *pkt1_data, uint32_t pkt1_len,
+                                  void *pkt2_data, uint32_t pkt2_len) {
+    if (queue_idx >= iface->queue_count)
+        return -1;
+
+    struct xsk_queue *queue = &iface->queues[queue_idx];
+    int num_pkts = (pkt2_data && pkt2_len > 0) ? 2 : 1;
+    uint32_t idx;
+    int ret = 0;
+
+    pthread_mutex_lock(&queue->tx_lock);
+
+    /* Release completed TX */
+    uint32_t comp_idx;
+    int completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
+    if (completed > 0)
+        xsk_ring_cons__release(&queue->comp, completed);
+
+    /* Reserve slots (1 hoặc 2) */
+    int reserved = xsk_ring_prod__reserve(&queue->tx, num_pkts, &idx);
+    if (reserved < num_pkts) {
+        /* Flush pending và retry */
+        if (queue->pending_tx_count > 0) {
+            sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+            queue->pending_tx_count = 0;
+        }
+
+        completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
+        if (completed > 0)
+            xsk_ring_cons__release(&queue->comp, completed);
+
+        /* Retry với wait */
+        for (int retry = 0; retry < 20; retry++) {
+            reserved = xsk_ring_prod__reserve(&queue->tx, num_pkts, &idx);
+            if (reserved >= num_pkts)
+                break;
+            __asm__ volatile("pause");
+            completed = xsk_ring_cons__peek(&queue->comp, iface->ring_size, &comp_idx);
+            if (completed > 0)
+                xsk_ring_cons__release(&queue->comp, completed);
+        }
+
+        if (reserved < num_pkts) {
+            ret = -1;
+            goto unlock;
+        }
+    }
+
+    /* Copy packet 1 */
+    uint64_t addr1 = ((queue->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
+    queue->tx_slot++;
+    void *tx_ptr1 = xsk_umem__get_data(queue->umem_area, addr1);
+    memcpy(tx_ptr1, pkt1_data, pkt1_len);
+
+    struct xdp_desc *desc1 = xsk_ring_prod__tx_desc(&queue->tx, idx);
+    desc1->addr = addr1;
+    desc1->len = pkt1_len;
+
+    /* Copy packet 2 nếu có */
+    if (num_pkts == 2) {
+        uint64_t addr2 = ((queue->tx_slot % iface->ring_size) + iface->ring_size) * iface->frame_size;
+        queue->tx_slot++;
+        void *tx_ptr2 = xsk_umem__get_data(queue->umem_area, addr2);
+        memcpy(tx_ptr2, pkt2_data, pkt2_len);
+
+        struct xdp_desc *desc2 = xsk_ring_prod__tx_desc(&queue->tx, idx + 1);
+        desc2->addr = addr2;
+        desc2->len = pkt2_len;
+    }
+
+    /* Submit */
+    xsk_ring_prod__submit(&queue->tx, num_pkts);
+    queue->pending_tx_count += num_pkts;
+    __sync_fetch_and_add(&iface->tx_packets, num_pkts);
+    __sync_fetch_and_add(&iface->tx_bytes, pkt1_len + pkt2_len);
+
+    /* Flush nếu pending nhiều */
+    if (queue->pending_tx_count >= 8) {
+        sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+        queue->pending_tx_count = 0;
+    }
+
+unlock:
+    pthread_mutex_unlock(&queue->tx_lock);
+    return ret;
+}
+
 int interface_send_to_local_batch_queue(struct xsk_interface *iface,
                                          int queue_idx,
                                          const struct local_config *local_cfg,

@@ -674,17 +674,12 @@ static void *worker_thread(void *arg) {
                                      protocol, wire_total - pkt_len);
             }
 
-            if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
+            /* Gửi 2 fragments atomic */
+            if (interface_send_packets_queue(wan, tq, frag1_buf, f1_len, frag2_buf, f2_len) == 0) {
+                __sync_fetch_and_add(&fwd->local_to_wan, 2);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                __sync_fetch_and_add(&fwd->total_dropped, 2);
             }
 
         } else if (crypto_layer == 2 && frag_need_split_l2(pkt_len)) {
@@ -714,17 +709,12 @@ static void *worker_thread(void *arg) {
                                      protocol, wire_total - pkt_len);
             }
 
-            if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
+            /* Gửi 2 fragments atomic */
+            if (interface_send_packets_queue(wan, tq, frag1_buf, f1_len, frag2_buf, f2_len) == 0) {
+                __sync_fetch_and_add(&fwd->local_to_wan, 2);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                __sync_fetch_and_add(&fwd->total_dropped, 2);
             }
 
         } else {
@@ -873,23 +863,9 @@ void forwarder_cleanup(struct forwarder *fwd) {
  * Mỗi option có hàm run riêng, core layout riêng, không đụng chạm nhau.
  * ======================================================================== */
 
-/* NO-CRYPTO: Ring Mode với 5 core mỗi chiều
- * Local→WAN: core 0-4
- * WAN→Local: core 5-9 */
+/* NO-CRYPTO: Mode đơn giản - mỗi queue 1 thread forward thẳng
+ * KHÔNG ring buffer, KHÔNG fragment, KHÔNG crypto */
 static void forwarder_run_no_crypto(struct forwarder *fwd) {
-    fprintf(stderr, "[NO-CRYPTO RING] Starting with %d workers per direction\n", NUM_RING_WORKERS);
-    
-    /* Init rings */
-    for (int i = 0; i < NUM_RING_WORKERS; i++) {
-        g_local_to_wan_rings[i].head = 0;
-        g_local_to_wan_rings[i].tail = 0;
-        pthread_spin_init(&g_local_to_wan_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
-        
-        g_wan_to_local_rings[i].head = 0;
-        g_wan_to_local_rings[i].tail = 0;
-        pthread_spin_init(&g_wan_to_local_rings[i].lock, PTHREAD_PROCESS_PRIVATE);
-    }
-    
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
         total_local_queues += fwd->locals[i].queue_count;
@@ -898,15 +874,15 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
     for (int i = 0; i < fwd->wan_count; i++)
         total_wan_queues += fwd->wans[i].queue_count;
     
-    int total_threads = total_local_queues + total_wan_queues + NUM_RING_WORKERS * 2;
+    int total_threads = total_local_queues + total_wan_queues;
     
-    fprintf(stderr, "[NO-CRYPTO RING] local_queues=%d, wan_queues=%d, workers=%d, total_threads=%d\n",
-            total_local_queues, total_wan_queues, NUM_RING_WORKERS * 2, total_threads);
+    fprintf(stderr, "[NO-CRYPTO] Simple mode: local_queues=%d, wan_queues=%d, total_threads=%d\n",
+            total_local_queues, total_wan_queues, total_threads);
     
     pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
     struct queue_thread_args *args = calloc(total_threads, sizeof(struct queue_thread_args));
     if (!threads || !args) {
-        fprintf(stderr, "[NO-CRYPTO RING] Failed to allocate\n");
+        fprintf(stderr, "[NO-CRYPTO] Failed to allocate\n");
         free(threads); free(args);
         return;
     }
@@ -915,56 +891,37 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
     pthread_create(&gc_tid, NULL, gc_thread, NULL);
     
     int thread_idx = 0;
+    int core_id = 0;
     
-    /* Local RX dispatchers - chia đều trên core 0-4 */
-    int local_disp_idx = 0;
+    /* Local queues: mỗi queue 1 thread forward thẳng ra WAN */
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
         for (int q = 0; q < local->queue_count; q++) {
             args[thread_idx].fwd = fwd;
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
-            args[thread_idx].core_id = local_disp_idx % NUM_RING_WORKERS;
-            pthread_create(&threads[thread_idx], NULL, local_rx_dispatcher_thread, &args[thread_idx]);
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = core_id++;
+            pthread_create(&threads[thread_idx], NULL, local_queue_thread_no_crypto, &args[thread_idx]);
             thread_idx++;
-            local_disp_idx++;
         }
     }
     
-    /* WAN RX dispatchers - chia đều trên core 5-9 */
-    int wan_disp_idx = 0;
+    /* WAN queues: mỗi queue 1 thread forward thẳng về Local */
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
         for (int q = 0; q < wan->queue_count; q++) {
             args[thread_idx].fwd = fwd;
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
-            args[thread_idx].core_id = 5 + (wan_disp_idx % NUM_RING_WORKERS);
-            pthread_create(&threads[thread_idx], NULL, wan_rx_dispatcher_thread, &args[thread_idx]);
+            args[thread_idx].tx_queue_base = q;
+            args[thread_idx].core_id = core_id++;
+            pthread_create(&threads[thread_idx], NULL, wan_queue_thread_no_crypto, &args[thread_idx]);
             thread_idx++;
-            wan_disp_idx++;
         }
     }
     
-    /* Local→WAN workers: core 0-4 */
-    for (int w = 0; w < NUM_RING_WORKERS; w++) {
-        args[thread_idx].fwd = fwd;
-        args[thread_idx].worker_id = w;
-        args[thread_idx].core_id = w;
-        pthread_create(&threads[thread_idx], NULL, local_to_wan_ring_worker, &args[thread_idx]);
-        thread_idx++;
-    }
-    
-    /* WAN→Local workers: core 5-9 */
-    for (int w = 0; w < NUM_RING_WORKERS; w++) {
-        args[thread_idx].fwd = fwd;
-        args[thread_idx].worker_id = w;
-        args[thread_idx].core_id = 5 + w;
-        pthread_create(&threads[thread_idx], NULL, wan_to_local_ring_worker, &args[thread_idx]);
-        thread_idx++;
-    }
-    
-    fprintf(stderr, "[NO-CRYPTO RING] All %d threads started\n", thread_idx);
+    fprintf(stderr, "[NO-CRYPTO] All %d threads started\n", thread_idx);
     
     while (running) sleep(1);
     
@@ -1450,26 +1407,26 @@ static void *local_to_wan_ring_worker(void *arg) {
                 memcpy(frag2_buf, wan->dst_mac, 6);
                 memcpy(frag2_buf + 6, wan->src_mac, 6);
                 
-                if (interface_send_batch_queue(wan, tx_q, frag1_buf, f1_len) == 0)
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                if (interface_send_batch_queue(wan, tx_q, frag2_buf, f2_len) == 0)
-                    __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                interface_send_flush_queue(wan, tx_q);
+                /* Gửi 2 fragments atomic */
+                if (interface_send_packets_queue(wan, tx_q, frag1_buf, f1_len, frag2_buf, f2_len) == 0) {
+                    __sync_fetch_and_add(&fwd->local_to_wan, 2);
+                } else {
+                    __sync_fetch_and_add(&fwd->total_dropped, 2);
+                }
             } else {
                 if (encrypt_packet(data, &len) != 0) {
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                     continue;
                 }
-                if (interface_send_batch_queue(wan, tx_q, data, len) == 0) {
+                /* Gửi 1 packet */
+                if (interface_send_packets_queue(wan, tx_q, data, len, NULL, 0) == 0) {
                     __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                    interface_send_flush_queue(wan, tx_q);
                 }
             }
         } else {
-            /* NO CRYPTO: chỉ forward */
-            if (interface_send_batch_queue(wan, tx_q, data, len) == 0) {
+            /* NO CRYPTO: chỉ forward 1 packet */
+            if (interface_send_packets_queue(wan, tx_q, data, len, NULL, 0) == 0) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                interface_send_flush_queue(wan, tx_q);
             }
         }
     }
