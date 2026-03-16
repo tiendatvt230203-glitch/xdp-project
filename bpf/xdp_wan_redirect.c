@@ -51,69 +51,41 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
     __u16 proto = eth->h_proto;
 
-    /* Mặc định chỉ redirect IP + fake-ethertype (L2 tunnel) */
-    if (proto != __constant_htons(ETH_P_IP) &&
-        proto != __constant_htons(ETH_P_IPV6)) {
-        int key0 = 0, key1 = 1;
-        __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
-        if (!(fake4 && *fake4 != 0 &&
-              (proto & __constant_htons(0xFF00)) == (*fake4 & __constant_htons(0xFF00)))) {
-            __u16 *fake6 = bpf_map_lookup_elem(&wan_config_map, &key1);
-            if (!(fake6 && *fake6 != 0 &&
-                  (proto & __constant_htons(0xFF00)) == (*fake6 & __constant_htons(0xFF00)))) {
-                inc_stat(STAT_NON_IP);
-                return XDP_PASS;
-            }
-        }
-    }
+    if (proto == __constant_htons(ETH_P_IP))
+        goto redirect;
 
-    /* TỰ HASH flow để chia đều 4 queue XSK, KHÔNG phụ thuộc rx_queue_index */
-    __u32 h = 0;
+    if (proto == __constant_htons(ETH_P_IPV6))
+        goto redirect;
 
-    if (proto == __constant_htons(ETH_P_IP)) {
-        struct iphdr *iph = (void *)(eth + 1);
-        if ((void *)(iph + 1) > data_end)
-            return XDP_PASS;
+    int key0 = 0, key1 = 1;
+    __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
+    if (fake4 && *fake4 != 0 &&
+        (proto & __constant_htons(0xFF00)) == (*fake4 & __constant_htons(0xFF00)))
+        goto redirect;
 
-        h = iph->saddr ^ iph->daddr;
-        /* 6 = TCP, 17 = UDP (tránh include thêm header) */
-        if (iph->protocol == 6 || iph->protocol == 17) {
-            __u8 *trans = (void *)iph + iph->ihl * 4;
-            if (trans + 4 <= (unsigned char *)data_end) {
-                __u16 sport = *(__u16 *)trans;
-                __u16 dport = *(__u16 *)(trans + 2);
-                h ^= ((__u32)sport << 16) | dport;
-            }
-        }
-    } else {
-        /* IPv6 hoặc fake-ethertype L2: dùng vài byte MAC để hash */
-        __u32 mac_hi = ((__u32)eth->h_source[0] << 24) |
-                       ((__u32)eth->h_source[1] << 16) |
-                       ((__u32)eth->h_source[2] << 8)  |
-                       ((__u32)eth->h_source[3]);
-        __u32 mac_lo = ((__u32)eth->h_dest[2] << 24) |
-                       ((__u32)eth->h_dest[3] << 16) |
-                       ((__u32)eth->h_dest[4] << 8)  |
-                       ((__u32)eth->h_dest[5]);
-        h = mac_hi ^ mac_lo;
-    }
+    __u16 *fake6 = bpf_map_lookup_elem(&wan_config_map, &key1);
+    if (fake6 && *fake6 != 0 &&
+        (proto & __constant_htons(0xFF00)) == (*fake6 & __constant_htons(0xFF00)))
+        goto redirect;
 
-    /* Hash đơn giản rồi mod 4: 4 entry XSKMAP: 0,1,2,3 */
-    h ^= h >> 16;
-    h *= 0x85ebca6b;
-    h ^= h >> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >> 16;
+    inc_stat(STAT_NON_IP);
+    return XDP_PASS;
 
-    int queue_id = h & 3;  /* 0..3 */
+redirect:
+    ;
+    int queue_id = ctx->rx_queue_index;
     int ret = bpf_redirect_map(&wan_xsks_map, queue_id, XDP_PASS);
 
-    if (ret == XDP_REDIRECT)
+    if (ret == XDP_REDIRECT) {
         inc_stat(STAT_REDIRECT);
-    else
+    } else {
         inc_stat(STAT_NO_SOCK);
+    }
 
     return ret;
 }
 
 char _license[] SEC("license") = "GPL";
+
+
+

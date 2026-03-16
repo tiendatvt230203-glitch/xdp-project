@@ -358,9 +358,8 @@ static void *local_queue_thread_l2(void *arg) {
 
         int wan_used[MAX_INTERFACES] = {0};
         int wan_tx_q[MAX_INTERFACES];
-        /* L2: WAN gửi gộp 1 queue */
         for (int w = 0; w < fwd->wan_count; w++)
-            wan_tx_q[w] = 0;
+            wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
 
         for (int i = 0; i < rcvd; i++) {
             uint32_t src_ip, dst_ip;
@@ -1006,7 +1005,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    /* Tự động set queue count cho local: luôn dùng 4 queue (kể cả L2) */
+    /* Tự động set queue count cho local nếu chưa được config */
     for (int i = 0; i < cfg->local_count; i++) {
         if (cfg->locals[i].queue_count <= 1) {
             int want = 4;
@@ -1018,10 +1017,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     }
 
     /* Tự động set queue count cho WAN nếu chưa được config */
-    if (crypto_layer == 2) {
-        for (int i = 0; i < cfg->wan_count; i++)
-            cfg->wans[i].queue_count = 1;
-    } else if (!crypto_enabled) {
+    if (!crypto_enabled) {
         for (int i = 0; i < cfg->wan_count; i++) {
             if (cfg->wans[i].queue_count <= 1) {
                 int hwq = interface_get_queue_count(cfg->wans[i].ifname);
@@ -1045,7 +1041,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     }
     total_threads += NUM_WORKERS;
 
-    /* Local: luôn 4 queue, dùng xdp_redirect.c (no-crypto / L2 / L4 giống nhau) */
     for (int i = 0; i < cfg->local_count; i++) {
         if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
             fprintf(stderr, "Failed to init LOCAL %s\n", cfg->locals[i].ifname);
@@ -1054,14 +1049,10 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         fwd->local_count++;
     }
 
-    const char *wan_bpf =
-        (crypto_enabled && crypto_layer == 2) ? "bpf/xdp_wan_redirect_l2.o"
-                                              : "bpf/xdp_wan_redirect.o";
-
     for (int i = 0; i < cfg->wan_count; i++) {
         uint16_t wan_fake4 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv4 : 0;
         uint16_t wan_fake6 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv6 : 0;
-        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], wan_bpf, wan_fake4, wan_fake6) != 0) {
+        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", wan_fake4, wan_fake6) != 0) {
             fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
             goto err_wans;
         }
@@ -1170,7 +1161,8 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
     free(args);
 }
 
-/* LAYER2: Local 4 queue → core 0-3; 3 WAN bóp 1 queue/card, XDP redirect 5 slot → core 5-9 */
+/* LAYER2: Local->WAN trên core 0-3 (rã gói + mã hóa + fw),
+ *         WAN->Local trên core 4-7 (giải mã + ráp gói + fw) */
 static void forwarder_run_l2(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
@@ -1208,7 +1200,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
 
     int thread_idx = 0;
 
-    /* Local->WAN: 4 queue (card local giữ 4 queue) → core 0,1,2,3 */
+    /* Local->WAN: core 0-3, dùng hàm L2 riêng */
     int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
@@ -1217,7 +1209,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = local_rx_idx % 4; /* core 0,1,2,3 */
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_l2, &args[thread_idx]);
@@ -1226,7 +1218,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
         }
     }
 
-    /* WAN->Local: 5 slot XSK/card (XDP redirect L2) → core 5,6,7,8,9 */
+    /* WAN->Local: core 4-7, dùng hàm L2 riêng */
     int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
@@ -1235,7 +1227,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 5 + (wan_worker_idx % 5);
+            args[thread_idx].core_id = 6 + (wan_worker_idx % 6);
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread_l2, &args[thread_idx]);
