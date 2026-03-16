@@ -1724,6 +1724,192 @@ err_queues:
     return -1;
 }
 
+#define L2_WAN_XSK_SLOTS 5
+
+/* L2: 1 queue phần cứng, 5 XSK shared umem → XDP redirect vào 5 slot (5 core). */
+int interface_init_wan_rx_l2(struct xsk_interface *iface,
+                             const struct wan_config *wan_cfg,
+                             uint16_t fake_ethertype_ipv4,
+                             uint16_t fake_ethertype_ipv6) {
+    int ret;
+    struct bpf_object *wan_bpf_obj = NULL;
+    struct bpf_program *prog;
+    struct bpf_map *map;
+    int prog_fd, wan_xsk_map_fd;
+
+    memset(iface, 0, sizeof(*iface));
+    iface->ifindex = if_nametoindex(wan_cfg->ifname);
+    strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
+    memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
+    memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
+
+    if (iface->ifindex == 0) {
+        fprintf(stderr, "WAN L2 Interface %s not found\n", wan_cfg->ifname);
+        return -1;
+    }
+
+    interface_set_queue_count(wan_cfg->ifname, 1);
+    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+
+    if (access("bpf/xdp_wan_redirect_l2.o", F_OK) != 0) {
+        fprintf(stderr, "WAN L2 XDP object not found: bpf/xdp_wan_redirect_l2.o\n");
+        return -1;
+    }
+
+    wan_bpf_obj = bpf_object__open_file("bpf/xdp_wan_redirect_l2.o", NULL);
+    if (libbpf_get_error(wan_bpf_obj)) {
+        fprintf(stderr, "Failed to open WAN L2 BPF\n");
+        return -1;
+    }
+
+    ret = bpf_object__load(wan_bpf_obj);
+    if (ret) {
+        fprintf(stderr, "Failed to load WAN L2 BPF object\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+
+    prog = bpf_object__find_program_by_name(wan_bpf_obj, "xdp_wan_redirect_l2_prog");
+    if (!prog) {
+        fprintf(stderr, "WAN L2 XDP program not found\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+    prog_fd = bpf_program__fd(prog);
+
+    map = bpf_object__find_map_by_name(wan_bpf_obj, "wan_xsks_map");
+    if (!map) {
+        fprintf(stderr, "wan_xsks_map not found in L2 object\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+    wan_xsk_map_fd = bpf_map__fd(map);
+
+    map = bpf_object__find_map_by_name(wan_bpf_obj, "wan_config_map");
+    if (map) {
+        int cfg_fd = bpf_map__fd(map);
+        int key0 = 0, key1 = 1;
+        uint16_t fake4_net = htons(fake_ethertype_ipv4);
+        uint16_t fake6_net = htons(fake_ethertype_ipv6);
+        bpf_map_update_elem(cfg_fd, &key0, &fake4_net, 0);
+        bpf_map_update_elem(cfg_fd, &key1, &fake6_net, 0);
+    }
+
+    size_t wan_umem_size = (size_t)wan_cfg->umem_mb * 1024 * 1024;
+    iface->umem_size = wan_umem_size;
+    iface->ring_size = wan_cfg->ring_size;
+    iface->frame_size = wan_cfg->frame_size;
+    iface->batch_size = wan_cfg->batch_size;
+
+    struct xsk_umem_config umem_cfg = {
+        .fill_size = wan_cfg->ring_size,
+        .comp_size = wan_cfg->ring_size,
+        .frame_size = wan_cfg->frame_size,
+        .frame_headroom = 0,
+        .flags = 0
+    };
+
+    struct xsk_socket_config sock_cfg = {
+        .rx_size = wan_cfg->ring_size,
+        .tx_size = wan_cfg->ring_size,
+        .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
+        .bind_flags = XDP_COPY
+    };
+
+    struct xsk_queue *queue0 = &iface->queues[0];
+    ret = posix_memalign(&queue0->bufs, getpagesize(), wan_umem_size);
+    if (ret || !queue0->bufs) {
+        fprintf(stderr, "WAN L2: posix_memalign failed\n");
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+    mlock(queue0->bufs, wan_umem_size);
+
+    ret = xsk_umem__create(&queue0->umem, queue0->bufs, wan_umem_size,
+                           &queue0->fill, &queue0->comp, &umem_cfg);
+    if (ret) {
+        fprintf(stderr, "WAN L2: xsk_umem__create failed: %d\n", ret);
+        munlock(queue0->bufs, wan_umem_size);
+        free(queue0->bufs);
+        queue0->bufs = NULL;
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+
+    for (int q = 0; q < L2_WAN_XSK_SLOTS; q++) {
+        struct xsk_queue *queue = &iface->queues[q];
+        if (q > 0) {
+            queue->bufs = NULL;
+            queue->umem = NULL;
+        }
+        ret = xsk_socket__create(&queue->xsk, iface->ifname, 0, queue0->umem,
+                                 &queue->rx, &queue->tx, &sock_cfg);
+        if (ret) {
+            fprintf(stderr, "WAN L2 slot %d: xsk_socket__create failed: %d\n", q, ret);
+            for (int j = 0; j < q; j++) {
+                xsk_socket__delete(iface->queues[j].xsk);
+            }
+            xsk_umem__delete(queue0->umem);
+            munlock(queue0->bufs, wan_umem_size);
+            free(queue0->bufs);
+            bpf_object__close(wan_bpf_obj);
+            return -1;
+        }
+
+        int fd = xsk_socket__fd(queue->xsk);
+        ret = bpf_map_update_elem(wan_xsk_map_fd, &q, &fd, 0);
+        if (ret) {
+            fprintf(stderr, "WAN L2 slot %d: bpf_map_update_elem failed\n", q);
+            xsk_socket__delete(queue->xsk);
+            for (int j = 0; j < q; j++)
+                xsk_socket__delete(iface->queues[j].xsk);
+            xsk_umem__delete(queue0->umem);
+            munlock(queue0->bufs, wan_umem_size);
+            free(queue0->bufs);
+            bpf_object__close(wan_bpf_obj);
+            return -1;
+        }
+
+        queue->tx_slot = 0;
+        queue->pending_tx_count = 0;
+        pthread_mutex_init(&queue->tx_lock, NULL);
+        iface->queue_count++;
+    }
+
+    {
+        uint32_t idx;
+        ret = xsk_ring_prod__reserve(&queue0->fill, wan_cfg->ring_size, &idx);
+        if (ret == (int)wan_cfg->ring_size) {
+            for (int i = 0; i < ret; i++)
+                *xsk_ring_prod__fill_addr(&queue0->fill, idx + i) = i * wan_cfg->frame_size;
+            xsk_ring_prod__submit(&queue0->fill, ret);
+        }
+    }
+
+    ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
+    if (ret) {
+        fprintf(stderr, "WAN L2 bpf_set_link_xdp_fd failed: %d\n", ret);
+        for (int q = 0; q < L2_WAN_XSK_SLOTS; q++)
+            xsk_socket__delete(iface->queues[q].xsk);
+        xsk_umem__delete(queue0->umem);
+        munlock(queue0->bufs, wan_umem_size);
+        free(queue0->bufs);
+        bpf_object__close(wan_bpf_obj);
+        return -1;
+    }
+
+    iface->xsk = iface->queues[0].xsk;
+    iface->tx = iface->queues[0].tx;
+    iface->comp = iface->queues[0].comp;
+    iface->bufs = iface->queues[0].bufs;
+    iface->tx_slot = 0;
+    iface->pending_tx_count = 0;
+    pthread_mutex_init(&iface->tx_lock, NULL);
+    iface->bpf_obj_owner = wan_bpf_obj;
+
+    return 0;
+}
+
 void interface_cleanup(struct xsk_interface *iface) {
     pthread_mutex_destroy(&iface->tx_lock);
 
@@ -1754,6 +1940,11 @@ void interface_cleanup(struct xsk_interface *iface) {
             munlock(iface->bufs, iface->umem_size);
             free(iface->bufs);
         }
+    }
+
+    if (iface->bpf_obj_owner) {
+        bpf_object__close((struct bpf_object *)iface->bpf_obj_owner);
+        iface->bpf_obj_owner = NULL;
     }
 
     memset(iface, 0, sizeof(*iface));

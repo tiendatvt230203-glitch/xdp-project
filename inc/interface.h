@@ -53,6 +53,8 @@ struct xsk_interface {
     uint64_t tx_packets;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
+
+    void *bpf_obj_owner; /* L2: BPF object to close in cleanup */
 };
 
 int interface_init_local(struct xsk_interface *iface,
@@ -67,6 +69,12 @@ int interface_init_wan_rx(struct xsk_interface *iface,
                           const char *bpf_file,
                           uint16_t fake_ethertype_ipv4,
                           uint16_t fake_ethertype_ipv6);
+
+/* L2: 1 queue phần cứng, 5 XSK (shared umem) → 5 core WAN->Local */
+int interface_init_wan_rx_l2(struct xsk_interface *iface,
+                            const struct wan_config *wan_cfg,
+                            uint16_t fake_ethertype_ipv4,
+                            uint16_t fake_ethertype_ipv6);
 
 void interface_cleanup(struct xsk_interface *iface);
 

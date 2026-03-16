@@ -1,8 +1,16 @@
+/*
+ * XDP redirect cho WAN khi mã hóa Layer 2.
+ * Mỗi card WAN chỉ 1 queue; chương trình hash gói và redirect vào 5 slot XSK (0..4)
+ * tương ứng 5 core xử lý WAN->Local, tránh nghẽn 1 queue.
+ * Giữ nguyên xdp_wan_redirect.c cho no-crypto và Layer 4.
+ */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
+#define L2_WAN_XSK_SLOTS  5
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
@@ -38,7 +46,7 @@ static __always_inline void inc_stat(int idx)
 }
 
 SEC("xdp")
-int xdp_wan_redirect_prog(struct xdp_md *ctx)
+int xdp_wan_redirect_l2_prog(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -51,7 +59,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
     __u16 proto = eth->h_proto;
 
-    /* Mặc định chỉ redirect IP + fake-ethertype (L2 tunnel) */
+    /* Chỉ redirect IP hoặc fake-ethertype (L2 tunnel) */
     if (proto != __constant_htons(ETH_P_IP) &&
         proto != __constant_htons(ETH_P_IPV6)) {
         int key0 = 0, key1 = 1;
@@ -67,7 +75,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         }
     }
 
-    /* TỰ HASH flow để chia đều 4 queue XSK, KHÔNG phụ thuộc rx_queue_index */
+    /* Hash flow → redirect vào 1 trong 5 slot XSK (5 core WAN->Local) */
     __u32 h = 0;
 
     if (proto == __constant_htons(ETH_P_IP)) {
@@ -76,7 +84,6 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
             return XDP_PASS;
 
         h = iph->saddr ^ iph->daddr;
-        /* 6 = TCP, 17 = UDP (tránh include thêm header) */
         if (iph->protocol == 6 || iph->protocol == 17) {
             __u8 *trans = (void *)iph + iph->ihl * 4;
             if (trans + 4 <= (unsigned char *)data_end) {
@@ -85,27 +92,28 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
                 h ^= ((__u32)sport << 16) | dport;
             }
         }
-    } else {
-        /* IPv6 hoặc fake-ethertype L2: dùng vài byte MAC để hash */
-        __u32 mac_hi = ((__u32)eth->h_source[0] << 24) |
-                       ((__u32)eth->h_source[1] << 16) |
-                       ((__u32)eth->h_source[2] << 8)  |
-                       ((__u32)eth->h_source[3]);
-        __u32 mac_lo = ((__u32)eth->h_dest[2] << 24) |
-                       ((__u32)eth->h_dest[3] << 16) |
-                       ((__u32)eth->h_dest[4] << 8)  |
-                       ((__u32)eth->h_dest[5]);
-        h = mac_hi ^ mac_lo;
+    } 
+    else {
+        /*
+         * Fake ethertype (L2 encrypted): MAC giống nhau cho mọi gói cùng WAN
+         * → hash payload (nonce + ciphertext) để phân tán đều 5 core.
+         */
+        unsigned char *pay = (unsigned char *)(eth + 1);
+        if (pay + 8 <= (unsigned char *)data_end) {
+            h = *(__u32 *)pay ^ (*(__u32 *)(pay + 4));
+        } else if (pay + 4 <= (unsigned char *)data_end) {
+            h = *(__u32 *)pay;
+        }
     }
 
-    /* Hash đơn giản rồi mod 4: 4 entry XSKMAP: 0,1,2,3 */
     h ^= h >> 16;
     h *= 0x85ebca6b;
     h ^= h >> 13;
     h *= 0xc2b2ae35;
     h ^= h >> 16;
 
-    int queue_id = h & 3;  /* 0..3 */
+    /* 5 slot: core 5,6,7,8,9 */
+    int queue_id = (int)(h % L2_WAN_XSK_SLOTS);
     int ret = bpf_redirect_map(&wan_xsks_map, queue_id, XDP_PASS);
 
     if (ret == XDP_REDIRECT)

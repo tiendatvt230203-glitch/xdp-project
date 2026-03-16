@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
 
         forwarder_run(&fwd);
         forwarder_cleanup(&fwd);
+        forwarder_print_stats(&fwd);
     }
 
     PQfinish(listen_conn);

@@ -667,13 +667,13 @@ int crypto_aes_gcm_encrypt(const uint8_t key[AES_MAX_KEY_SIZE],
     int out_len;
     int key_size = get_key_size();
 
-    /* OPTIMIZATION: Cache cipher + key. Chỉ re-init nếu key thay đổi hoặc nonce_len thay đổi */
+
     int key_changed = !tls_key_cached ||
                       memcmp(tls_cached_key, key, key_size) != 0 ||
                       tls_cached_nonce_len != nonce_len;
 
     if (__builtin_expect(key_changed, 0)) {
-        /* Full init - chỉ xảy ra lần đầu hoặc khi key rotation */
+
         if (EVP_EncryptInit_ex(evp, get_gcm_cipher(), NULL, NULL, NULL) != 1)
             return -1;
 
@@ -687,7 +687,7 @@ int crypto_aes_gcm_encrypt(const uint8_t key[AES_MAX_KEY_SIZE],
         tls_key_cached = 1;
         tls_cached_nonce_len = nonce_len;
     } else {
-        /* Fast path: chỉ update nonce (IV) */
+
         if (EVP_EncryptInit_ex(evp, NULL, NULL, NULL, nonce) != 1)
             return -1;
     }
@@ -716,13 +716,13 @@ int crypto_aes_gcm_decrypt(const uint8_t key[AES_MAX_KEY_SIZE],
     int out_len;
     int key_size = get_key_size();
 
-    /* OPTIMIZATION: Cache cipher + key. Chỉ re-init nếu key thay đổi */
+
     int key_changed = !tls_dec_key_cached ||
                       memcmp(tls_dec_cached_key, key, key_size) != 0 ||
                       tls_dec_cached_nonce_len != nonce_len;
 
     if (__builtin_expect(key_changed, 0)) {
-        /* Full init */
+
         if (EVP_DecryptInit_ex(evp, get_gcm_cipher(), NULL, NULL, NULL) != 1)
             return -1;
 
@@ -736,7 +736,7 @@ int crypto_aes_gcm_decrypt(const uint8_t key[AES_MAX_KEY_SIZE],
         tls_dec_key_cached = 1;
         tls_dec_cached_nonce_len = nonce_len;
     } else {
-        /* Fast path: chỉ update nonce */
+
         if (EVP_DecryptInit_ex(evp, NULL, NULL, NULL, nonce) != 1)
             return -1;
     }
