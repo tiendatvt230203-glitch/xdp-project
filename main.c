@@ -61,7 +61,12 @@ static int wait_for_notify(PGconn *conn) {
 }
 
 int main(int argc, char **argv) {
-    const char *db_url = getenv("DB_URL");
+    const char *db_host = getenv("DB_HOST");
+    const char *db_port = getenv("DB_PORT");
+    const char *db_user = getenv("DB_USER");
+    const char *db_name = getenv("DB_NAME");
+    const char *db_pass = getenv("DB_PASS");
+
     int cpu_core = -1;
     int config_id = -1;
 
@@ -76,14 +81,21 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!db_url)
+    /* phải có đủ thông tin DB thì mới chạy */
+    if (!db_host || !db_port || !db_user || !db_name || !db_pass)
         return 1;
 
     libbpf_set_print(libbpf_print_silent);
 
-    /* CLI mode: network-encryp -id <ID>  → chỉ gửi NOTIFY cho daemon rồi thoát */
+    /* ghép connection string cho libpq */
+    char conninfo[512];
+    snprintf(conninfo, sizeof(conninfo),
+             "host=%s port=%s dbname=%s user=%s password=%s",
+             db_host, db_port, db_name, db_user, db_pass);
+
+    /* CLI mode: network-encryptor -id <ID>  → chỉ gửi NOTIFY cho daemon rồi thoát */
     if (config_id >= 0) {
-        PGconn *conn = PQconnectdb(db_url);
+        PGconn *conn = PQconnectdb(conninfo);
         if (PQstatus(conn) != CONNECTION_OK) {
             PQfinish(conn);
             return 1;
@@ -101,7 +113,7 @@ int main(int argc, char **argv) {
     if (cpu_core >= 0 && pin_to_cpu_core(cpu_core) != 0)
         return 1;
 
-    PGconn *listen_conn = PQconnectdb(db_url);
+    PGconn *listen_conn = PQconnectdb(conninfo);
     if (PQstatus(listen_conn) != CONNECTION_OK) {
         PQfinish(listen_conn);
         return 1;
@@ -114,7 +126,7 @@ int main(int argc, char **argv) {
         if (id < 0) break;
 
         struct app_config cfg;
-        if (config_load_from_db(&cfg, id, db_url) != 0) continue;
+        if (config_load_from_db(&cfg, id, conninfo) != 0) continue;
         if (config_validate(&cfg) != 0) continue;
 
         struct forwarder fwd;
