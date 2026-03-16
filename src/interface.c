@@ -1839,7 +1839,8 @@ int interface_init_wan_rx_l2(struct xsk_interface *iface,
     for (int q = 0; q < L2_WAN_XSK_SLOTS; q++) {
         struct xsk_queue *queue = &iface->queues[q];
         if (q > 0) {
-            queue->bufs = NULL;
+            /* share cùng buffer với queue0, chỉ queue0 sở hữu umem/bufs */
+            queue->bufs = queue0->bufs;
             queue->umem = NULL;
         }
         ret = xsk_socket__create(&queue->xsk, iface->ifname, 0, queue0->umem,
@@ -1921,11 +1922,13 @@ void interface_cleanup(struct xsk_interface *iface) {
         pthread_mutex_destroy(&queue->tx_lock);
         if (queue->xsk)
             xsk_socket__delete(queue->xsk);
-        if (queue->umem)
+        if (queue->umem) {
+            /* chỉ free buffer khi đây là owner của umem */
             xsk_umem__delete(queue->umem);
-        if (queue->bufs) {
-            munlock(queue->bufs, iface->umem_size);
-            free(queue->bufs);
+            if (queue->bufs) {
+                munlock(queue->bufs, iface->umem_size);
+                free(queue->bufs);
+            }
         }
     }
 
