@@ -1054,19 +1054,16 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         fwd->local_count++;
     }
 
+    const char *wan_bpf =
+        (crypto_enabled && crypto_layer == 2) ? "bpf/xdp_wan_redirect_l2.o"
+                                              : "bpf/xdp_wan_redirect.o";
+
     for (int i = 0; i < cfg->wan_count; i++) {
         uint16_t wan_fake4 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv4 : 0;
         uint16_t wan_fake6 = (crypto_enabled && crypto_layer == 2) ? cfg->fake_ethertype_ipv6 : 0;
-        if (crypto_layer == 2) {
-            if (interface_init_wan_rx_l2(&fwd->wans[i], &cfg->wans[i], wan_fake4, wan_fake6) != 0) {
-                fprintf(stderr, "Failed to init WAN L2 %s\n", cfg->wans[i].ifname);
-                goto err_wans;
-            }
-        } else {
-            if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], "bpf/xdp_wan_redirect.o", wan_fake4, wan_fake6) != 0) {
-                fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
-                goto err_wans;
-            }
+        if (interface_init_wan_rx(&fwd->wans[i], &cfg->wans[i], wan_bpf, wan_fake4, wan_fake6) != 0) {
+            fprintf(stderr, "Failed to init WAN %s\n", cfg->wans[i].ifname);
+            goto err_wans;
         }
         fwd->wan_count++;
     }
