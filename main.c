@@ -3,6 +3,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sched.h>
 #include <bpf/libbpf.h>
 #include <libpq-fe.h>
@@ -30,11 +32,38 @@ static int pin_to_cpu_core(int cpu_core) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_core, &cpuset);
-    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0) {
-        perror("[DAEMON] sched_setaffinity");
+    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0)
+        return -1;
+    return 0;
+}
+
+static int setup_unix_socket(const char *path) {
+    if (!path || !path[0])
+        return -1;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    unlink(path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
         return -1;
     }
-    return 0;
+
+    if (listen(fd, 8) < 0) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+
+    chmod(path, 0660);
+    return fd;
 }
 
 static int wait_for_notify(PGconn *conn) {
@@ -66,6 +95,8 @@ int main(int argc, char **argv) {
     const char *db_user = getenv("DB_USER");
     const char *db_name = getenv("DB_NAME");
     const char *db_pass = getenv("DB_PASS");
+
+    const char *sock_path = getenv("MWAN_SOCKET_PATH");
 
     int cpu_core = -1;
     int config_id = -1;
@@ -109,9 +140,10 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    /* Daemon mode: systemctl start → chờ NOTIFY để chạy theo config */
     if (cpu_core >= 0 && pin_to_cpu_core(cpu_core) != 0)
         return 1;
+    int unix_sock_fd = setup_unix_socket(sock_path);
+    (void)unix_sock_fd;
 
     PGconn *listen_conn = PQconnectdb(conninfo);
     if (PQstatus(listen_conn) != CONNECTION_OK) {
