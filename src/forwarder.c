@@ -92,6 +92,10 @@ static void sigint_handler(int sig) {
     running = 0;
 }
 
+static int mac_is_nonzero(const uint8_t mac[6]) {
+    return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
+}
+
 static uint32_t get_dest_ip(void *pkt_data, uint32_t pkt_len) {
     if (pkt_len < sizeof(struct ether_header) + sizeof(struct iphdr))
         return 0;
@@ -300,8 +304,12 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                     tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
             }
 
-            memcpy(pkt, local_cfg->dst_mac, 6);
-            memcpy(pkt + 6, local_iface->src_mac, 6);
+            if (mac_is_nonzero(local_cfg->dst_mac)) {
+                memcpy(pkt, local_cfg->dst_mac, 6);
+            }
+            if (mac_is_nonzero(local_iface->src_mac)) {
+                memcpy(pkt + 6, local_iface->src_mac, 6);
+            }
 
             if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg, pkt, pkt_len) == 0) {
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);
@@ -621,8 +629,12 @@ static void *wan_queue_thread_l2(void *arg) {
                     tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
             }
 
-            memcpy(final_pkt, local_cfg->dst_mac, 6);
-            memcpy(final_pkt + 6, local_iface->src_mac, 6);
+            if (mac_is_nonzero(local_cfg->dst_mac)) {
+                memcpy(final_pkt, local_cfg->dst_mac, 6);
+            }
+            if (mac_is_nonzero(local_iface->src_mac)) {
+                memcpy(final_pkt + 6, local_iface->src_mac, 6);
+            }
 
             if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg, final_pkt, final_len) == 0) {
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);
@@ -758,8 +770,12 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
             }
 
-            memcpy(final_pkt, local_cfg->dst_mac, 6);
-            memcpy(final_pkt + 6, local_iface->src_mac, 6);
+            if (mac_is_nonzero(local_cfg->dst_mac)) {
+                memcpy(final_pkt, local_cfg->dst_mac, 6);
+            }
+            if (mac_is_nonzero(local_iface->src_mac)) {
+                memcpy(final_pkt + 6, local_iface->src_mac, 6);
+            }
 
             if (interface_send_to_local_batch_queue(local_iface, tq, local_cfg, final_pkt, final_len) == 0) {
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);

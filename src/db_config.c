@@ -96,21 +96,7 @@ static int load_local_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
-        v = PQgetvalue(res, row, PQfnumber(res, "src_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, loc->src_mac) != 0) {
-                fprintf(stderr, "[DB LOCAL] Invalid src_mac: %s\n", v);
-                return -1;
-            }
-        }
-
-        v = PQgetvalue(res, row, PQfnumber(res, "dst_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, loc->dst_mac) != 0) {
-                fprintf(stderr, "[DB LOCAL] Invalid dst_mac: %s\n", v);
-                return -1;
-            }
-        }
+        /* Không còn đọc src_mac/dst_mac từ DB cho local */
 
         cfg->local_count++;
     }
@@ -149,21 +135,7 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
         }
         strncpy(wan->ifname, v, IF_NAMESIZE - 1);
 
-        v = PQgetvalue(res, row, PQfnumber(res, "src_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, wan->src_mac) != 0) {
-                fprintf(stderr, "[DB WAN] Invalid src_mac: %s\n", v);
-                return -1;
-            }
-        }
-
-        v = PQgetvalue(res, row, PQfnumber(res, "dst_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, wan->dst_mac) != 0) {
-                fprintf(stderr, "[DB WAN] Invalid dst_mac: %s\n", v);
-                return -1;
-            }
-        }
+        /* Không còn đọc src_mac/dst_mac từ DB cho WAN */
 
         cfg->wan_count++;
     }
@@ -172,17 +144,37 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
 
 int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_str)
 {
-    if (!cfg || !conn_str) {
-        fprintf(stderr, "[DB] Null pointer argument\n");
+    (void)conn_str; /* hiện tại không dùng: chúng ta lấy cấu hình DB từ env */
+
+    if (!cfg) {
+        fprintf(stderr, "[DB] Null pointer argument (cfg)\n");
         return -1;
     }
+
+    const char *db_host = getenv("DB_HOST");
+    const char *db_port = getenv("DB_PORT");
+    const char *db_user = getenv("DB_USER");
+    const char *db_name = getenv("DB_NAME");
+    const char *db_pass = getenv("DB_PASS");
+
+    if (!db_host || !db_port || !db_user || !db_name || !db_pass) {
+        fprintf(stderr, "[DB] Missing DB_* environment variables in config_load_from_db\n");
+        return -1;
+    }
+
+    const char *keywords[] = {
+        "host", "port", "dbname", "user", "password", "connect_timeout", NULL,
+    };
+    const char *values[] = {
+        db_host, db_port, db_name, db_user, db_pass, "10", NULL,
+    };
 
     memset(cfg, 0, sizeof(*cfg));
     strncpy(cfg->bpf_file, "bpf/xdp_redirect.o", sizeof(cfg->bpf_file) - 1);
     cfg->global_frame_size = DEFAULT_FRAME_SIZE;
     cfg->global_batch_size = DEFAULT_BATCH_SIZE;
 
-    PGconn *conn = PQconnectdb(conn_str);
+    PGconn *conn = PQconnectdbParams(keywords, values, 0);
     if (PQstatus(conn) != CONNECTION_OK) {
         fprintf(stderr, "[DB] Connection failed: %s\n", PQerrorMessage(conn));
         PQfinish(conn);
@@ -223,7 +215,7 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, network, src_mac, dst_mac "
+            "SELECT ifname, network "
             "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
@@ -243,7 +235,7 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, src_mac, dst_mac "
+            "SELECT ifname "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
@@ -288,10 +280,11 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
                 cfg->fake_ethertype_ipv4 = 0x88b5;
                 cfg->fake_ethertype_ipv6 = 0x88b6;
             }
-        } else if (cfg->encrypt_layer == 3 || cfg->encrypt_layer == 4) {
+        } else if (cfg->encrypt_layer == 3) {
             if (cfg->fake_protocol == 0)
                 cfg->fake_protocol = 99;
         }
+        /* encrypt_layer == 4: không tự ép fake_protocol, để nguyên theo DB */
     }
 
     return config_validate(cfg);
