@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS xdp_local_configs (
 CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     id SERIAL PRIMARY KEY,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
-    ifname VARCHAR(32) NOT NULL
+    ifname VARCHAR(32) NOT NULL,
+    src_mac TEXT,
+    dst_mac TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_local_config_id ON xdp_local_configs(config_id);
