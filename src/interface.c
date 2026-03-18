@@ -1937,8 +1937,16 @@ int interface_send_to_local(struct xsk_interface *iface,
     memcpy(tx_buf, pkt_data, pkt_len);
 
     eth = (struct ether_header *)tx_buf;
-    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
-    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+    /* Cho phép caller set MAC trực tiếp lên packet (ARP cache),
+     * chỉ overwrite nếu config có giá trị khác 0. */
+    if (local_cfg->dst_mac[0] | local_cfg->dst_mac[1] | local_cfg->dst_mac[2] |
+        local_cfg->dst_mac[3] | local_cfg->dst_mac[4] | local_cfg->dst_mac[5]) {
+        memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
+    }
+    if (local_cfg->src_mac[0] | local_cfg->src_mac[1] | local_cfg->src_mac[2] |
+        local_cfg->src_mac[3] | local_cfg->src_mac[4] | local_cfg->src_mac[5]) {
+        memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+    }
 
     xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
     xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
@@ -2084,8 +2092,14 @@ int interface_send_to_local_batch(struct xsk_interface *iface,
     memcpy(tx_buf, pkt_data, pkt_len);
 
     eth = (struct ether_header *)tx_buf;
-    memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
-    memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+    if (local_cfg->dst_mac[0] | local_cfg->dst_mac[1] | local_cfg->dst_mac[2] |
+        local_cfg->dst_mac[3] | local_cfg->dst_mac[4] | local_cfg->dst_mac[5]) {
+        memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
+    }
+    if (local_cfg->src_mac[0] | local_cfg->src_mac[1] | local_cfg->src_mac[2] |
+        local_cfg->src_mac[3] | local_cfg->src_mac[4] | local_cfg->src_mac[5]) {
+        memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+    }
 
     xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
     xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
@@ -2320,8 +2334,14 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
         memcpy(tx_buf, pkt_data, pkt_len);
 
         eth = (struct ether_header *)tx_buf;
+    if (local_cfg->dst_mac[0] | local_cfg->dst_mac[1] | local_cfg->dst_mac[2] |
+        local_cfg->dst_mac[3] | local_cfg->dst_mac[4] | local_cfg->dst_mac[5]) {
         memcpy(eth->ether_dhost, local_cfg->dst_mac, MAC_LEN);
+    }
+    if (local_cfg->src_mac[0] | local_cfg->src_mac[1] | local_cfg->src_mac[2] |
+        local_cfg->src_mac[3] | local_cfg->src_mac[4] | local_cfg->src_mac[5]) {
         memcpy(eth->ether_shost, local_cfg->src_mac, MAC_LEN);
+    }
 
         xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
         xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;
