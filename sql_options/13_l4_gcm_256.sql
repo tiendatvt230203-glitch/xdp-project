@@ -12,7 +12,7 @@ INSERT INTO xdp_configs (
     aes_bits,
     nonce_size
 ) VALUES
-(13, 1, '5cb0851b5b2408bbed5dd5672cc4b04564857bfe6c518d92fcacc938a789aab6', 4, 99, 'gcm', 256, 16);
+(13, 1, '5cb0851b5b2408bbed5dd5672cc4b04564857bfe6c518d92fcacc938a789aab6', 4, 0, 'gcm', 256, 16);
 
 INSERT INTO xdp_local_configs (
     config_id,
