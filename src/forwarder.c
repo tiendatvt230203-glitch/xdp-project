@@ -34,7 +34,7 @@ static struct flow_table g_flow_table;
 #define ARP_PERSIST_DIR "/var/lib/network-encryptor"
 
 struct arp_entry {
-    uint32_t ip; /* network order */
+    uint32_t ip; 
     uint8_t mac[6];
     uint32_t last_seen_sec;
 };
@@ -42,11 +42,11 @@ struct arp_entry {
 struct arp_cache {
     struct arp_entry entries[ARP_CACHE_SIZE];
     pthread_mutex_t lock;
-    int raw_fd;              /* AF_PACKET */
+    int raw_fd;             
     int ifindex;
     char ifname[IF_NAMESIZE];
     uint8_t if_mac[6];
-    uint32_t if_ip;          /* network order */
+    uint32_t if_ip;         
     uint32_t persist_dirty;
 };
 
@@ -76,7 +76,7 @@ static int get_iface_mac_and_ip(const char *ifname, uint8_t mac_out[6], uint32_t
         return -1;
     }
     struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
-    *ip_out = sin->sin_addr.s_addr; /* already network order */
+    *ip_out = sin->sin_addr.s_addr; 
 
     close(fd);
     return 0;
@@ -412,15 +412,13 @@ static inline uint32_t flow_hash_local_tq(uint32_t src_ip, uint32_t dst_ip,
 static void *gc_thread(void *arg) {
     (void)arg;
     while (running) {
-        sleep(60);  /* was 10s: GC lock contention caused drop spike at ~10s */
+        sleep(60); 
         flow_table_gc(&g_flow_table);
     }
     return NULL;
 }
 
-/* ========================================================================
- * NO-CRYPTO: Hàm riêng cho option không mã hóa - chỉ forward, không check gì
- * ======================================================================== */
+
 
 static void *local_queue_thread_no_crypto(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
@@ -550,7 +548,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                     tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
             }
 
-            /* ARP cache lookup for dest_ip */
+            
             uint8_t dst_mac[6];
             if (arp_cache_lookup(&g_arp[local_idx], dest_ip, dst_mac)) {
                 memcpy(pkt, dst_mac, 6);
@@ -585,10 +583,6 @@ static void *wan_queue_thread_no_crypto(void *arg) {
 
     return NULL;
 }
-
-/* ========================================================================
- * LAYER 2: Hàm riêng cho option mã hóa Layer 2
- * ======================================================================== */
 
 static void *local_queue_thread_l2(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
@@ -707,10 +701,6 @@ static void *local_queue_thread_l2(void *arg) {
     return NULL;
 }
 
-/* ========================================================================
- * LAYER 3/4: Hàm dùng cho L3 và L4 (enqueue to worker)
- * ======================================================================== */
-
 static void *local_queue_thread_l3l4(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
     struct forwarder *fwd = args->fwd;
@@ -780,9 +770,7 @@ static void *local_queue_thread_l3l4(void *arg) {
     return NULL;
 }
 
-/* ========================================================================
- * LAYER 2: wan_queue_thread riêng cho Layer 2 - giải mã + ráp gói + fw
- * ======================================================================== */
+
 
 static void *wan_queue_thread_l2(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
@@ -918,9 +906,7 @@ static void *wan_queue_thread_l2(void *arg) {
     return NULL;
 }
 
-/* ========================================================================
- * LAYER 3/4: wan_queue_thread cho Layer 3 và 4
- * ======================================================================== */
+
 
 static void *wan_queue_thread_l3l4(void *arg) {
     struct queue_thread_args *args = (struct queue_thread_args *)arg;
@@ -1278,7 +1264,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    /* Tự động set queue count cho local nếu chưa được config */
+    
     for (int i = 0; i < cfg->local_count; i++) {
         if (cfg->locals[i].queue_count <= 1) {
             int want = 4;
@@ -1289,7 +1275,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    /* Tự động set queue count cho WAN nếu chưa được config */
+    
     if (!crypto_enabled) {
         for (int i = 0; i < cfg->wan_count; i++) {
             if (cfg->wans[i].queue_count <= 1) {
@@ -1322,7 +1308,15 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         fwd->local_count++;
     }
 
-    /* Init ARP cache/listener for each local iface */
+    /* Push redirect CIDR rules to XDP config_map after BPF object is loaded. */
+    if (cfg->redirect.src_count > 0 || cfg->redirect.dst_count > 0) {
+        if (interface_push_redirect_cfg(&cfg->redirect) != 0) {
+            fprintf(stderr, "[XDP] Failed to push redirect rules to config_map\n");
+            /* Không fail hẳn forwarder: chỉ mất tính năng redirect. */
+        }
+    }
+
+    
     for (int i = 0; i < fwd->local_count; i++) {
         if (arp_init_for_local(&g_arp[i], &fwd->locals[i]) == 0) {
             pthread_t tid;
@@ -1369,12 +1363,7 @@ void forwarder_cleanup(struct forwarder *fwd) {
         interface_cleanup(&fwd->wans[i]);
 }
 
-/* ========================================================================
- * PER-OPTION forwarder_run implementations
- * Mỗi option có hàm run riêng, core layout riêng, không đụng chạm nhau.
- * ======================================================================== */
 
-/* NO-CRYPTO: Local->WAN trên core 0-3, WAN->Local trên core 4-7 */
 static void forwarder_run_no_crypto(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
@@ -1399,7 +1388,7 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
 
     int thread_idx = 0;
 
-    /* Local->WAN: core 0-3, dùng hàm riêng NO-CRYPTO */
+
     int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
@@ -1417,7 +1406,7 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
         }
     }
 
-    /* WAN->Local: core 4-7, dùng hàm riêng NO-CRYPTO */
+
     int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
@@ -1446,8 +1435,7 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
     free(args);
 }
 
-/* LAYER2: Local->WAN trên core 0-3 (rã gói + mã hóa + fw),
- *         WAN->Local trên core 4-7 (giải mã + ráp gói + fw) */
+
 static void forwarder_run_l2(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
@@ -1457,7 +1445,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
     for (int i = 0; i < fwd->wan_count; i++)
         total_wan_queues += fwd->wans[i].queue_count;
 
-    /* DEBUG: In ra số queue đang sử dụng */
+
     fprintf(stderr, "[L2 DEBUG] total_local_queues=%d, total_wan_queues=%d\n",
             total_local_queues, total_wan_queues);
     for (int i = 0; i < fwd->local_count; i++) {
@@ -1469,7 +1457,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
                 i, fwd->wans[i].ifname, fwd->wans[i].queue_count);
     }
 
-    /* L2 không dùng worker riêng, mỗi thread tự xử lý full pipeline */
+
     int total_threads = total_local_queues + total_wan_queues;
 
     pthread_t *threads = calloc(total_threads, sizeof(pthread_t));
@@ -1485,7 +1473,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
 
     int thread_idx = 0;
 
-    /* Local->WAN: core 0-3, dùng hàm L2 riêng */
+
     int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
@@ -1494,7 +1482,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4; /* core 0,1,2,3 */
+            args[thread_idx].core_id = local_rx_idx % 4;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_l2, &args[thread_idx]);
@@ -1503,7 +1491,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
         }
     }
 
-    /* WAN->Local: core 4-7, dùng hàm L2 riêng */
+
     int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
@@ -1532,8 +1520,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
     free(args);
 }
 
-/* LAYER3: Local->WAN trên core 0-3 (RX) + core 4-7 (worker crypto/fw),
- *         WAN->Local trên core 8-11 */
+
 static void forwarder_run_l3(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
@@ -1564,7 +1551,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
 
     int thread_idx = 0;
 
-    /* Local RX: core 0-3, dùng hàm L3/L4 */
+
     int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
@@ -1582,7 +1569,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
         }
     }
 
-    /* WAN->Local: core 8-11, dùng hàm L3/L4 */
+
     int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
@@ -1600,7 +1587,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
         }
     }
 
-    /* Worker crypto/fw Local->WAN: core 4-7 */
+
     for (int w = 0; w < NUM_WORKERS; w++) {
         args[thread_idx].fwd = fwd;
         args[thread_idx].iface_idx = -1;
@@ -1624,7 +1611,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
     free(args);
 }
 
-/* LAYER4: Tương tự L3, có thể tùy chỉnh core layout riêng sau */
+
 static void forwarder_run_l4(struct forwarder *fwd) {
     int total_local_queues = 0;
     for (int i = 0; i < fwd->local_count; i++)
@@ -1655,7 +1642,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
 
     int thread_idx = 0;
 
-    /* Local RX: core 0-3, dùng hàm L3/L4 */
+
     int local_rx_idx = 0;
     for (int i = 0; i < fwd->local_count; i++) {
         struct xsk_interface *local = &fwd->locals[i];
@@ -1673,7 +1660,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
         }
     }
 
-    /* WAN->Local: core 8-11, dùng hàm L3/L4 */
+
     int wan_worker_idx = 0;
     for (int i = 0; i < fwd->wan_count; i++) {
         struct xsk_interface *wan = &fwd->wans[i];
@@ -1691,7 +1678,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
         }
     }
 
-    /* Worker crypto/fw Local->WAN: core 4-7 */
+
     for (int w = 0; w < NUM_WORKERS; w++) {
         args[thread_idx].fwd = fwd;
         args[thread_idx].iface_idx = -1;
@@ -1715,7 +1702,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
     free(args);
 }
 
-/* ======================================================================== */
+
 
 void forwarder_run(struct forwarder *fwd) {
     signal(SIGINT, sigint_handler);
@@ -1730,7 +1717,6 @@ void forwarder_run(struct forwarder *fwd) {
     } else if (crypto_layer == 4) {
         forwarder_run_l4(fwd);
     } else {
-        /* Fallback: dùng L3-style */
         forwarder_run_l3(fwd);
     }
 }

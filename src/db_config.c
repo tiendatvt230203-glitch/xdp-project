@@ -96,8 +96,6 @@ static int load_local_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
-        /* Không còn đọc src_mac/dst_mac từ DB cho local */
-
         cfg->local_count++;
     }
     return 0;
@@ -156,9 +154,64 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
     return 0;
 }
 
+
+static int load_redirect_rules(struct app_config *cfg, PGconn *conn, int config_id)
+{
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%d", config_id);
+    const char *params[1] = { id_str };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT src_cidr, dst_cidr "
+        "FROM xdp_redirect_rules WHERE config_id = $1 ORDER BY id",
+        1, NULL, params, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[DB] Query xdp_redirect_rules failed: %s\n",
+                PQerrorMessage(conn));
+        PQclear(res);
+        return -1;
+    }
+
+    int nrows = PQntuples(res);
+    cfg->redirect.src_count = 0;
+    cfg->redirect.dst_count = 0;
+
+    for (int i = 0; i < nrows; i++) {
+        const char *src = PQgetvalue(res, i, 0);
+        const char *dst = PQgetvalue(res, i, 1);
+
+        uint32_t sip, smask, snet;
+        uint32_t dip, dmask, dnet;
+
+        if (parse_ip_cidr_pub(src, &sip, &smask, &snet) != 0 ||
+            parse_ip_cidr_pub(dst, &dip, &dmask, &dnet) != 0) {
+            fprintf(stderr, "[DB] Invalid redirect CIDR: %s -> %s\n", src, dst);
+            PQclear(res);
+            return -1;
+        }
+
+        if (cfg->redirect.src_count < MAX_SRC_NETS) {
+            int si = cfg->redirect.src_count++;
+            cfg->redirect.src_net[si]  = snet;
+            cfg->redirect.src_mask[si] = smask;
+        }
+
+        if (cfg->redirect.dst_count < MAX_DST_NETS) {
+            int di = cfg->redirect.dst_count++;
+            cfg->redirect.dst_net[di]  = dnet;
+            cfg->redirect.dst_mask[di] = dmask;
+        }
+    }
+
+    PQclear(res);
+    return 0;
+}
+
+
 int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_str)
 {
-    (void)conn_str; /* hiện tại không dùng: chúng ta lấy cấu hình DB từ env */
+    (void)conn_str;
 
     if (!cfg) {
         fprintf(stderr, "[DB] Null pointer argument (cfg)\n");
@@ -246,6 +299,11 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
         PQclear(res);
     }
 
+    if (load_redirect_rules(cfg, conn, config_id) != 0) {
+        PQfinish(conn);
+        return -1;
+    }
+
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
@@ -298,8 +356,6 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
             if (cfg->fake_protocol == 0)
                 cfg->fake_protocol = 99;
         }
-        /* encrypt_layer == 4: không tự ép fake_protocol, để nguyên theo DB */
     }
-
     return config_validate(cfg);
 }

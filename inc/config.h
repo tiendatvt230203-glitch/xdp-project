@@ -20,9 +20,9 @@
 #define DEFAULT_RING_SIZE       262144
 #define DEFAULT_RING_SIZE_WAN   32768
 #define DEFAULT_WINDOW_KB       8192
-
-
-
+#define MAX_SRC_NETS 32
+#define MAX_DST_NETS 32
+#define MAX_REDIRECT_RULES 32
 #define DEFAULT_QUEUE_COUNT     1
 #define DEFAULT_LOCAL_RATE_LIMIT_MBPS 0
 
@@ -51,6 +51,15 @@ struct wan_config {
     uint32_t frame_size;
     int queue_count;
 };
+struct redirect_cfg {
+    uint32_t src_net[MAX_SRC_NETS];
+    uint32_t src_mask[MAX_SRC_NETS];
+    uint32_t src_count;
+
+    uint32_t dst_net[MAX_DST_NETS];
+    uint32_t dst_mask[MAX_DST_NETS];
+    uint32_t dst_count;
+};
 
 struct app_config {
     uint32_t global_frame_size;
@@ -70,10 +79,16 @@ struct app_config {
     uint16_t fake_ethertype_ipv4;
     uint16_t fake_ethertype_ipv6;
     uint8_t fake_protocol;
-    // uint32_t local_rate_limit_mbps;
     int crypto_mode;
     int nonce_size;
     int aes_bits;
+    struct redirect_cfg redirect;
+};
+struct redirect_rule {
+    uint32_t src_net;
+    uint32_t src_mask;
+    uint32_t dst_net;
+    uint32_t dst_mask;
 };
 
 int parse_mac(const char *str, uint8_t *mac);

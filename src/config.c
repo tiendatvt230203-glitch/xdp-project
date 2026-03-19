@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
-
+#include <libpq-fe.h>
 int parse_mac(const char *str, uint8_t *mac) {
     int values[6];
     if (sscanf(str, "%x:%x:%x:%x:%x:%x",
@@ -145,3 +145,5 @@ int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t
 int parse_hex_bytes_pub(const char *str, uint8_t *out, int expected_len) {
     return parse_hex_bytes(str, out, expected_len);
 }
+
+

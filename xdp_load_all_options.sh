@@ -37,4 +37,3 @@ done
 
 echo
 echo "Hoàn tất import tất cả file SQL trong ${SQL_DIR}."
-

@@ -10,18 +10,16 @@ INSERT INTO xdp_configs (
     fake_protocol,
     crypto_mode,
     aes_bits,
-    nonce_size
-) VALUES
+    nonce_size 
+) VALUES 
 (2, 1, '5cb0851b5b2408bbed5dd5672cc4b04564857bfe6c518d92fcacc938a789aab6', 2, 0, 'ctr', 256, 16);
 
 INSERT INTO xdp_local_configs (
     config_id,
     ifname,
-    network,
-    src_mac,
-    dst_mac
+    network
 ) VALUES
-(2, 'enp7s0', '192.168.9.0/24', '20:7c:14:f8:0c:d2', '20:7c:14:f8:0d:08');
+(2, 'enp7s0', '192.168.9.0/24');
 
 INSERT INTO xdp_wan_configs (
     config_id,
@@ -33,3 +31,9 @@ INSERT INTO xdp_wan_configs (
 (2, 'enp5s0', '20:7c:14:f8:0c:d0', '20:7c:14:f8:0d:4e'),
 (2, 'enp6s0', '20:7c:14:f8:0c:d1', '20:7c:14:f8:0d:4f');
 
+INSERT INTO xdp_redirect_rules (
+    config_id,
+    src_cidr,
+    dst_cidr
+) VALUES
+(2, '192.168.9.0/24' , '192.168.182.0/24');
