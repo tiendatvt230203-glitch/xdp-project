@@ -18,6 +18,7 @@
 #include <netpacket/packet.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <linux/rtnetlink.h>
 #include <linux/netlink.h>
 
@@ -34,7 +35,7 @@ static struct flow_table g_flow_table;
 
 #define ARP_CACHE_SIZE 2048
 #define ARP_PERSIST_DIR "/var/lib/network-encryptor"
-#define WAN_ARP_WAIT_MS 200
+#define WAN_ARP_WAIT_MS 2000
 
 struct arp_entry {
     uint32_t ip; 
@@ -50,6 +51,8 @@ struct arp_cache {
     char ifname[IF_NAMESIZE];
     uint8_t if_mac[6];
     uint32_t if_ip;         
+    uint32_t if_netmask;   
+    uint32_t default_gw_ip; /* network order */
     uint32_t persist_dirty;
     uint32_t last_req_ip;
     uint32_t last_req_sec;
@@ -85,6 +88,137 @@ static int get_iface_mac_and_ip(const char *ifname, uint8_t mac_out[6], uint32_t
 
     close(fd);
     return 0;
+}
+
+static int get_iface_netmask_ipv4(const char *ifname, uint32_t *netmask_out_net) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IF_NAMESIZE - 1);
+
+    if (ioctl(fd, SIOCGIFNETMASK, &ifr) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_netmask;
+    *netmask_out_net = sin->sin_addr.s_addr; /* network byte order */
+    close(fd);
+    return 0;
+}
+
+static void ip4_to_str(uint32_t ip_net, char *out, size_t out_sz) {
+    struct in_addr a;
+    a.s_addr = ip_net;
+    const char *s = inet_ntop(AF_INET, &a, out, (socklen_t)out_sz);
+    if (!s && out_sz > 0)
+        out[0] = '\0';
+}
+
+static uint32_t get_default_gateway_ipv4_by_ifindex(int ifindex) {
+    /* Best effort: return default route gateway for given OIF */
+    uint32_t gw_net = 0;
+
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (fd < 0) return 0;
+
+    struct {
+        struct nlmsghdr nlh;
+        struct rtmsg rtm;
+        char buf[256];
+    } req;
+    memset(&req, 0, sizeof(req));
+
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+    req.nlh.nlmsg_type = RTM_GETROUTE;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST;
+    req.nlh.nlmsg_pid = getpid();
+
+    req.rtm.rtm_family = AF_INET;
+    req.rtm.rtm_table = RT_TABLE_MAIN;
+    req.rtm.rtm_dst_len = 0; /* default route */
+    req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
+    req.rtm.rtm_protocol = RTPROT_UNSPEC;
+    req.rtm.rtm_type = RTN_UNICAST;
+
+    uint32_t zero = 0;
+    size_t aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
+    size_t rta_len_dst = RTA_LENGTH(sizeof(zero));
+    if (aligned + rta_len_dst <= sizeof(req)) {
+        struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
+        rta->rta_type = RTA_DST;
+        rta->rta_len = rta_len_dst;
+        memcpy(RTA_DATA(rta), &zero, sizeof(zero));
+        req.nlh.nlmsg_len = aligned + rta_len_dst;
+    }
+
+    aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
+    size_t rta_len_oif = RTA_LENGTH(sizeof(ifindex));
+    if (aligned + rta_len_oif <= sizeof(req)) {
+        struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
+        rta->rta_type = RTA_OIF;
+        rta->rta_len = rta_len_oif;
+        memcpy(RTA_DATA(rta), &ifindex, sizeof(ifindex));
+        req.nlh.nlmsg_len = aligned + rta_len_oif;
+    }
+
+    struct sockaddr_nl nladdr;
+    memset(&nladdr, 0, sizeof(nladdr));
+    nladdr.nl_family = AF_NETLINK;
+
+    if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+               (struct sockaddr *)&nladdr, sizeof(nladdr)) < 0) {
+        close(fd);
+        return 0;
+    }
+
+    char resp[4096];
+    int n = recv(fd, resp, sizeof(resp), 0);
+    close(fd);
+    if (n <= 0)
+        return 0;
+
+    for (struct nlmsghdr *h = (struct nlmsghdr *)resp; NLMSG_OK(h, n); h = NLMSG_NEXT(h, n)) {
+        if (h->nlmsg_type == NLMSG_ERROR)
+            break;
+        if (h->nlmsg_type != RTM_NEWROUTE)
+            continue;
+
+        struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(h);
+        if (rtm->rtm_family != AF_INET)
+            continue;
+        if (rtm->rtm_dst_len != 0)
+            continue;
+
+        int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*rtm));
+        struct rtattr *attr = (struct rtattr *)((char *)rtm + NLMSG_ALIGN(sizeof(*rtm)));
+        for (; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
+            if (attr->rta_type == RTA_GATEWAY) {
+                memcpy(&gw_net, RTA_DATA(attr), sizeof(gw_net));
+                return gw_net;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static uint32_t resolve_next_hop_ipv4_cached(const struct arp_cache *c, uint32_t dst_ip_net) {
+    if (!c || dst_ip_net == 0)
+        return dst_ip_net;
+
+    if (c->if_netmask != 0) {
+        uint32_t on_link = (dst_ip_net & c->if_netmask) == (c->if_ip & c->if_netmask);
+        if (on_link)
+            return dst_ip_net;
+    }
+
+    if (c->default_gw_ip != 0)
+        return c->default_gw_ip;
+
+    return dst_ip_net; /* fallback */
 }
 
 static uint32_t arp_hash(uint32_t ip) {
@@ -381,6 +515,11 @@ static int arp_init_for_local(struct arp_cache *c, const struct xsk_interface *l
         return -1;
     }
 
+    if (get_iface_netmask_ipv4(c->ifname, &c->if_netmask) != 0) {
+        c->if_netmask = 0;
+    }
+    c->default_gw_ip = get_default_gateway_ipv4_by_ifindex(c->ifindex);
+
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
     if (fd < 0) {
         fprintf(stderr, "[ARP] cannot open raw socket for %s\n", c->ifname);
@@ -601,9 +740,16 @@ static void *local_queue_thread_no_crypto(void *arg) {
             uint8_t wan_dst_mac[6];
             uint8_t wan_src_mac[6];
             memcpy(wan_src_mac, g_arp_wan[wan_idx].if_mac, 6);
-            uint32_t nh_ip = resolve_next_hop_ipv4(g_arp_wan[wan_idx].ifname, dst_ip);
-            if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip ? nh_ip : dst_ip,
+            uint32_t nh_ip = resolve_next_hop_ipv4_cached(&g_arp_wan[wan_idx], dst_ip);
+            if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip,
                                          wan_dst_mac, WAN_ARP_WAIT_MS)) {
+                char dst_buf[INET_ADDRSTRLEN];
+                char nh_buf[INET_ADDRSTRLEN];
+                ip4_to_str(dst_ip, dst_buf, sizeof(dst_buf));
+                ip4_to_str(nh_ip, nh_buf, sizeof(nh_buf));
+                fprintf(stderr,
+                        "[ARP] WAN resolve failed if=%s dst=%s nh=%s\n",
+                        g_arp_wan[wan_idx].ifname, dst_buf, nh_buf);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 continue;
             }
@@ -780,9 +926,16 @@ static void *local_queue_thread_l2(void *arg) {
             uint8_t wan_dst_mac[6];
             uint8_t wan_src_mac[6];
             memcpy(wan_src_mac, g_arp_wan[wan_idx].if_mac, 6);
-            uint32_t nh_ip = resolve_next_hop_ipv4(g_arp_wan[wan_idx].ifname, dst_ip);
-            if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip ? nh_ip : dst_ip,
+            uint32_t nh_ip = resolve_next_hop_ipv4_cached(&g_arp_wan[wan_idx], dst_ip);
+            if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip,
                                          wan_dst_mac, WAN_ARP_WAIT_MS)) {
+                char dst_buf[INET_ADDRSTRLEN];
+                char nh_buf[INET_ADDRSTRLEN];
+                ip4_to_str(dst_ip, dst_buf, sizeof(dst_buf));
+                ip4_to_str(nh_ip, nh_buf, sizeof(nh_buf));
+                fprintf(stderr,
+                        "[ARP] WAN resolve failed if=%s dst=%s nh=%s\n",
+                        g_arp_wan[wan_idx].ifname, dst_buf, nh_buf);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 continue;
             }
@@ -1263,9 +1416,16 @@ static void *worker_thread(void *arg) {
         uint8_t wan_dst_mac[6];
         uint8_t wan_src_mac[6];
         memcpy(wan_src_mac, g_arp_wan[wan_idx].if_mac, 6);
-        uint32_t nh_ip = resolve_next_hop_ipv4(g_arp_wan[wan_idx].ifname, dst_ip);
-        if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip ? nh_ip : dst_ip,
+        uint32_t nh_ip = resolve_next_hop_ipv4_cached(&g_arp_wan[wan_idx], dst_ip);
+        if (!arp_cache_resolve_wait(&g_arp_wan[wan_idx], nh_ip,
                                      wan_dst_mac, WAN_ARP_WAIT_MS)) {
+            char dst_buf[INET_ADDRSTRLEN];
+            char nh_buf[INET_ADDRSTRLEN];
+            ip4_to_str(dst_ip, dst_buf, sizeof(dst_buf));
+            ip4_to_str(nh_ip, nh_buf, sizeof(nh_buf));
+            fprintf(stderr,
+                    "[ARP] WAN resolve failed if=%s dst=%s nh=%s\n",
+                    g_arp_wan[wan_idx].ifname, dst_buf, nh_buf);
             __sync_fetch_and_add(&fwd->total_dropped, 1);
             goto release_local;
         }
