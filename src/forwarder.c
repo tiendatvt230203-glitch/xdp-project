@@ -60,8 +60,10 @@ struct arp_cache {
     uint32_t last_success_log_sec;
 };
 
-static struct arp_cache g_arp_local[MAX_INTERFACES];
+static struct arp_cache g_arp[MAX_INTERFACES];
 static struct arp_cache g_arp_wan[MAX_INTERFACES];
+
+static uint32_t g_dbg_no_local_match = 0;
 
 static int mac_is_nonzero6(const uint8_t mac[6]) {
     return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
@@ -657,6 +659,27 @@ static uint32_t get_dest_ip(void *pkt_data, uint32_t pkt_len) {
     return ip->daddr;
 }
 
+static void log_no_local_match(struct forwarder *fwd, uint32_t dest_ip) {
+    if (!fwd || !fwd->cfg) return;
+    if (g_dbg_no_local_match >= 5) return;
+
+    char dst_buf[INET_ADDRSTRLEN];
+    ip4_to_str(dest_ip, dst_buf, sizeof(dst_buf));
+
+    fprintf(stderr, "[NOLOCAL] dest_ip=%s local_count=%d\n",
+            dst_buf, fwd->cfg->local_count);
+    for (int i = 0; i < fwd->cfg->local_count && i < MAX_INTERFACES; i++) {
+        struct local_config *loc = &fwd->cfg->locals[i];
+        char net_buf[INET_ADDRSTRLEN];
+        char mask_buf[INET_ADDRSTRLEN];
+        ip4_to_str(loc->network, net_buf, sizeof(net_buf));
+        ip4_to_str(loc->netmask, mask_buf, sizeof(mask_buf));
+        fprintf(stderr, "[NOLOCAL]  local[%d] if=%s network=%s mask=%s\n",
+                i, loc->ifname, net_buf, mask_buf);
+    }
+    g_dbg_no_local_match++;
+}
+
 static int parse_flow(void *pkt_data, uint32_t pkt_len,
                       uint32_t *src_ip, uint32_t *dst_ip,
                       uint16_t *src_port, uint16_t *dst_port,
@@ -851,6 +874,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
             if (local_idx < 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                log_no_local_match(fwd, dest_ip);
                 continue;
             }
 
@@ -872,11 +896,11 @@ static void *wan_queue_thread_no_crypto(void *arg) {
 
             
             uint8_t dst_mac[6];
-            if (arp_cache_lookup(&g_arp_local[local_idx], dest_ip, dst_mac)) {
+            if (arp_cache_lookup(&g_arp[local_idx], dest_ip, dst_mac)) {
                 memcpy(pkt, dst_mac, 6);
-                memcpy(pkt + 6, g_arp_local[local_idx].if_mac, 6);
+                memcpy(pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
-                arp_send_request(&g_arp_local[local_idx], dest_ip);
+                arp_send_request(&g_arp[local_idx], dest_ip);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 interface_recv_release_single_queue(wan, queue_idx, &addrs[i], 1);
                 continue;
@@ -1188,6 +1212,7 @@ static void *wan_queue_thread_l2(void *arg) {
             if (local_idx < 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                log_no_local_match(fwd, dest_ip);
                 continue;
             }
 
@@ -1208,11 +1233,11 @@ static void *wan_queue_thread_l2(void *arg) {
             }
 
             uint8_t dst_mac[6];
-            if (arp_cache_lookup(&g_arp_local[local_idx], dest_ip, dst_mac)) {
+            if (arp_cache_lookup(&g_arp[local_idx], dest_ip, dst_mac)) {
                 memcpy(final_pkt, dst_mac, 6);
-                memcpy(final_pkt + 6, g_arp_local[local_idx].if_mac, 6);
+                memcpy(final_pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
-                arp_send_request(&g_arp_local[local_idx], dest_ip);
+                arp_send_request(&g_arp[local_idx], dest_ip);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 continue;
             }
@@ -1330,6 +1355,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
             if (local_idx < 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                log_no_local_match(fwd, dest_ip);
                 continue;
             }
 
@@ -1350,11 +1376,11 @@ static void *wan_queue_thread_l3l4(void *arg) {
             }
 
             uint8_t dst_mac[6];
-            if (arp_cache_lookup(&g_arp_local[local_idx], dest_ip, dst_mac)) {
+            if (arp_cache_lookup(&g_arp[local_idx], dest_ip, dst_mac)) {
                 memcpy(final_pkt, dst_mac, 6);
-                memcpy(final_pkt + 6, g_arp_local[local_idx].if_mac, 6);
+                memcpy(final_pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
-                arp_send_request(&g_arp_local[local_idx], dest_ip);
+                arp_send_request(&g_arp[local_idx], dest_ip);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 continue;
             }
@@ -1672,12 +1698,12 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
 
     
     for (int i = 0; i < fwd->local_count; i++) {
-        if (arp_init_for_local(&g_arp_local[i], &fwd->locals[i]) == 0) {
+        if (arp_init_for_local(&g_arp[i], &fwd->locals[i]) == 0) {
             pthread_t tid;
-            pthread_create(&tid, NULL, arp_listener_thread, &g_arp_local[i]);
+            pthread_create(&tid, NULL, arp_listener_thread, &g_arp[i]);
             pthread_detach(tid);
             fprintf(stderr, "[ARP] ready on %s (ip=%u)\n",
-                    g_arp_local[i].ifname, (unsigned)ntohl(g_arp_local[i].if_ip));
+                    g_arp[i].ifname, (unsigned)ntohl(g_arp[i].if_ip));
         }
     }
 
