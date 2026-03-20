@@ -133,6 +133,22 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
         }
         strncpy(wan->ifname, v, IF_NAMESIZE - 1);
 
+        v = PQgetvalue(res, row, PQfnumber(res, "src_mac"));
+        if (v && v[0] != '\0') {
+            if (parse_mac(v, wan->src_mac) != 0) {
+                fprintf(stderr, "[DB WAN] Invalid src_mac: %s\n", v);
+                return -1;
+            }
+        }
+
+        v = PQgetvalue(res, row, PQfnumber(res, "dst_mac"));
+        if (v && v[0] != '\0') {
+            if (parse_mac(v, wan->dst_mac) != 0) {
+                fprintf(stderr, "[DB WAN] Invalid dst_mac: %s\n", v);
+                return -1;
+            }
+        }
+
         cfg->wan_count++;
     }
     return 0;
@@ -291,7 +307,7 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname "
+            "SELECT ifname, src_mac, dst_mac "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
