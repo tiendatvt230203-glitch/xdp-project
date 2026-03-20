@@ -219,93 +219,104 @@ static uint32_t wan_pick_arp_target_ipv4(const char *ifname, uint32_t dst_ip_net
     if (ifindex == 0)
         return dst_ip_net;
 
-    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
-    if (fd < 0)
-        return dst_ip_net;
+    /* Try (1) route for dst_ip, then (2) default route (0.0.0.0/0).
+     * Some setups won't return a gateway for the exact dst but will for default. */
+    uint32_t query_dst_net[2] = { dst_ip_net, 0 };
+    int query_dst_len[2] = { 32, 0 };
 
-    struct {
-        struct nlmsghdr nlh;
-        struct rtmsg rtm;
-        char buf[256];
-    } req;
-    memset(&req, 0, sizeof(req));
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+        if (fd < 0)
+            return dst_ip_net;
 
-    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
-    req.nlh.nlmsg_type = RTM_GETROUTE;
-    req.nlh.nlmsg_flags = NLM_F_REQUEST;
-    req.nlh.nlmsg_pid = getpid();
+        struct {
+            struct nlmsghdr nlh;
+            struct rtmsg rtm;
+            char buf[256];
+        } req;
+        memset(&req, 0, sizeof(req));
 
-    req.rtm.rtm_family = AF_INET;
-    req.rtm.rtm_table = RT_TABLE_MAIN;
-    req.rtm.rtm_dst_len = 32;
-    req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
-    req.rtm.rtm_protocol = RTPROT_UNSPEC;
-    req.rtm.rtm_type = RTN_UNICAST;
+        req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+        req.nlh.nlmsg_type = RTM_GETROUTE;
+        req.nlh.nlmsg_flags = NLM_F_REQUEST;
+        req.nlh.nlmsg_pid = getpid();
 
-    /* Append attributes: RTA_DST and RTA_OIF */
-    {
-        size_t rta_len_dst = RTA_LENGTH(sizeof(dst_ip_net));
-        size_t aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
-        if (aligned + rta_len_dst < sizeof(req)) {
-            struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
-            rta->rta_type = RTA_DST;
-            rta->rta_len = rta_len_dst;
-            memcpy(RTA_DATA(rta), &dst_ip_net, sizeof(dst_ip_net));
-            req.nlh.nlmsg_len = aligned + rta_len_dst;
-        }
-    }
-    {
-        size_t rta_len_oif = RTA_LENGTH(sizeof(ifindex));
-        size_t aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
-        if (aligned + rta_len_oif < sizeof(req)) {
-            struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
-            rta->rta_type = RTA_OIF;
-            rta->rta_len = rta_len_oif;
-            memcpy(RTA_DATA(rta), &ifindex, sizeof(ifindex));
-            req.nlh.nlmsg_len = aligned + rta_len_oif;
-        }
-    }
+        req.rtm.rtm_family = AF_INET;
+        req.rtm.rtm_table = RT_TABLE_MAIN;
+        req.rtm.rtm_dst_len = query_dst_len[attempt];
+        req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
+        req.rtm.rtm_protocol = RTPROT_UNSPEC;
+        req.rtm.rtm_type = RTN_UNICAST;
 
-    struct sockaddr_nl nladdr;
-    memset(&nladdr, 0, sizeof(nladdr));
-    nladdr.nl_family = AF_NETLINK;
-
-    if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
-               (struct sockaddr *)&nladdr, sizeof(nladdr)) < 0) {
-        close(fd);
-        return dst_ip_net;
-    }
-
-    char resp[4096];
-    int n = recv(fd, resp, sizeof(resp), 0);
-    close(fd);
-    if (n <= 0)
-        return dst_ip_net;
-
-    uint32_t gw_net = 0;
-    for (struct nlmsghdr *h = (struct nlmsghdr *)resp; NLMSG_OK(h, (unsigned)n); h = NLMSG_NEXT(h, n)) {
-        if (h->nlmsg_type == NLMSG_ERROR)
-            break;
-        if (h->nlmsg_type != RTM_NEWROUTE)
-            continue;
-
-        struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(h);
-        (void)rtm;
-
-        int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg));
-        struct rtattr *attr = (struct rtattr *)((char *)rtm + NLMSG_ALIGN(sizeof(struct rtmsg)));
-
-        for (; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
-            if (attr->rta_type == RTA_GATEWAY) {
-                memcpy(&gw_net, RTA_DATA(attr), sizeof(gw_net));
-                break;
+        /* Append attributes: RTA_DST and RTA_OIF */
+        {
+            uint32_t dst_for_req = query_dst_net[attempt];
+            size_t rta_len_dst = RTA_LENGTH(sizeof(dst_for_req));
+            size_t aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
+            if (aligned + rta_len_dst < sizeof(req)) {
+                struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
+                rta->rta_type = RTA_DST;
+                rta->rta_len = rta_len_dst;
+                memcpy(RTA_DATA(rta), &dst_for_req, sizeof(dst_for_req));
+                req.nlh.nlmsg_len = aligned + rta_len_dst;
             }
         }
+        {
+            size_t rta_len_oif = RTA_LENGTH(sizeof(ifindex));
+            size_t aligned = NLMSG_ALIGN(req.nlh.nlmsg_len);
+            if (aligned + rta_len_oif < sizeof(req)) {
+                struct rtattr *rta = (struct rtattr *)((char *)&req + aligned);
+                rta->rta_type = RTA_OIF;
+                rta->rta_len = rta_len_oif;
+                memcpy(RTA_DATA(rta), &ifindex, sizeof(ifindex));
+                req.nlh.nlmsg_len = aligned + rta_len_oif;
+            }
+        }
+
+        struct sockaddr_nl nladdr;
+        memset(&nladdr, 0, sizeof(nladdr));
+        nladdr.nl_family = AF_NETLINK;
+
+        if (sendto(fd, &req, req.nlh.nlmsg_len, 0,
+                   (struct sockaddr *)&nladdr, sizeof(nladdr)) < 0) {
+            close(fd);
+            continue;
+        }
+
+        char resp[4096];
+        int n = recv(fd, resp, sizeof(resp), 0);
+        close(fd);
+        if (n <= 0)
+            continue;
+
+        uint32_t gw_net = 0;
+        for (struct nlmsghdr *h = (struct nlmsghdr *)resp; NLMSG_OK(h, (unsigned)n); h = NLMSG_NEXT(h, n)) {
+            if (h->nlmsg_type == NLMSG_ERROR)
+                break;
+            if (h->nlmsg_type != RTM_NEWROUTE)
+                continue;
+
+            struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(h);
+            (void)rtm;
+
+            int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg));
+            struct rtattr *attr = (struct rtattr *)((char *)rtm + NLMSG_ALIGN(sizeof(struct rtmsg)));
+
+            for (; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
+                if (attr->rta_type == RTA_GATEWAY) {
+                    memcpy(&gw_net, RTA_DATA(attr), sizeof(gw_net));
+                    break;
+                }
+            }
+            if (gw_net != 0)
+                break;
+        }
+
         if (gw_net != 0)
-            break;
+            return gw_net;
     }
 
-    return gw_net != 0 ? gw_net : dst_ip_net;
+    return dst_ip_net;
 }
 
 static int wan_resolve_dst_mac(int wan_idx, uint32_t dst_ip, uint8_t mac_out[6]) {
