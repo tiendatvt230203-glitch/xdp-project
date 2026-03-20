@@ -13,6 +13,10 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
+static inline int mac_is_nonzero6(const uint8_t mac[MAC_LEN]) {
+    return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
+}
+
 int interface_push_redirect_cfg(const struct redirect_cfg *rcfg)
 {
     if (config_map_fd < 0 || !rcfg)
