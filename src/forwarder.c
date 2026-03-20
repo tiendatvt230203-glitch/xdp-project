@@ -56,6 +56,8 @@ struct arp_cache {
     uint32_t persist_dirty;
     uint32_t last_req_ip;
     uint32_t last_req_sec;
+    uint32_t last_success_log_ip;
+    uint32_t last_success_log_sec;
 };
 
 static struct arp_cache g_arp_local[MAX_INTERFACES];
@@ -346,8 +348,28 @@ static int arp_cache_resolve_wait(struct arp_cache *c,
                                    uint32_t target_ip,
                                    uint8_t mac_out[6],
                                    int timeout_ms) {
-    if (arp_cache_lookup(c, target_ip, mac_out))
+    uint8_t tmp_mac[6];
+    if (!mac_out)
+        return 0;
+
+    if (arp_cache_lookup(c, target_ip, mac_out)) {
+        /* Log first few successful resolutions for debugging */
+        uint32_t now_sec = (uint32_t)time(NULL);
+        if (c->last_success_log_ip != target_ip || now_sec - c->last_success_log_sec >= 5) {
+            char ip_buf[INET_ADDRSTRLEN];
+            char mac_buf[64];
+            ip4_to_str(target_ip, ip_buf, sizeof(ip_buf));
+            snprintf(mac_buf, sizeof(mac_buf),
+                     "%02x:%02x:%02x:%02x:%02x:%02x",
+                     mac_out[0], mac_out[1], mac_out[2],
+                     mac_out[3], mac_out[4], mac_out[5]);
+            fprintf(stderr, "[ARP] WAN ok if=%s query=%s mac=%s\n",
+                    c->ifname, ip_buf, mac_buf);
+            c->last_success_log_ip = target_ip;
+            c->last_success_log_sec = now_sec;
+        }
         return 1;
+    }
 
     uint32_t now_sec = (uint32_t)time(NULL);
     int should_send = 0;
@@ -364,8 +386,23 @@ static int arp_cache_resolve_wait(struct arp_cache *c,
 
     for (int waited_ms = 0; waited_ms < timeout_ms; waited_ms++) {
         usleep(1000);
-        if (arp_cache_lookup(c, target_ip, mac_out))
+        if (arp_cache_lookup(c, target_ip, mac_out)) {
+            uint32_t now_sec = (uint32_t)time(NULL);
+            if (c->last_success_log_ip != target_ip || now_sec - c->last_success_log_sec >= 5) {
+                char ip_buf[INET_ADDRSTRLEN];
+                char mac_buf[64];
+                ip4_to_str(target_ip, ip_buf, sizeof(ip_buf));
+                snprintf(mac_buf, sizeof(mac_buf),
+                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                         mac_out[0], mac_out[1], mac_out[2],
+                         mac_out[3], mac_out[4], mac_out[5]);
+                fprintf(stderr, "[ARP] WAN ok if=%s query=%s mac=%s\n",
+                        c->ifname, ip_buf, mac_buf);
+                c->last_success_log_ip = target_ip;
+                c->last_success_log_sec = now_sec;
+            }
             return 1;
+        }
     }
     return 0;
 }
@@ -1748,8 +1785,10 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
         }
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1833,8 +1872,10 @@ static void forwarder_run_l2(struct forwarder *fwd) {
         }
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1924,8 +1965,10 @@ static void forwarder_run_l3(struct forwarder *fwd) {
         thread_idx++;
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -2015,8 +2058,10 @@ static void forwarder_run_l4(struct forwarder *fwd) {
         thread_idx++;
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
