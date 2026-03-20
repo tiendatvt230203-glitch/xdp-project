@@ -23,13 +23,11 @@ INSERT INTO xdp_local_configs (
 
 INSERT INTO xdp_wan_configs (
     config_id,
-    ifname,
-    src_mac,
-    dst_mac
+    ifname
 ) VALUES
-(6, 'enp4s0', '20:7c:14:f8:0c:cf', '20:7c:14:f8:0d:4d'),
-(6, 'enp5s0', '20:7c:14:f8:0c:d0', '20:7c:14:f8:0d:4e'),
-(6, 'enp6s0', '20:7c:14:f8:0c:d1', '20:7c:14:f8:0d:4f');
+(6, 'enp4s0'),
+(6, 'enp5s0'),
+(6, 'enp6s0');
 
 INSERT INTO xdp_redirect_rules (
     config_id,

@@ -13,6 +13,10 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
+static inline int mac_is_nonzero6(const uint8_t mac[MAC_LEN]) {
+    return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
+}
+
 int interface_push_redirect_cfg(const struct redirect_cfg *rcfg)
 {
     if (config_map_fd < 0 || !rcfg)
@@ -136,8 +140,8 @@ int interface_init_local(struct xsk_interface *iface,
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(local_cfg->ifname);
     strncpy(iface->ifname, local_cfg->ifname, IF_NAMESIZE - 1);
-    memcpy(iface->src_mac, local_cfg->src_mac, MAC_LEN);
-    memcpy(iface->dst_mac, local_cfg->dst_mac, MAC_LEN);
+    /* MAC cho local sẽ được đóng bởi ARP cache trong forwarder;
+     * giữ iface->src_mac/dst_mac = 0 để không override MAC đã được ARP set. */
 
     if (iface->ifindex == 0) {
         fprintf(stderr, "Interface %s not found\n", local_cfg->ifname);
@@ -311,8 +315,7 @@ int interface_init_wan(struct xsk_interface *iface,
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(wan_cfg->ifname);
     strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
-    memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
-    memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
+    /* MAC cho WAN sẽ được forwarder set động qua ARP cache. */
 
     if (iface->ifindex == 0) {
         fprintf(stderr, "Interface %s not found\n", wan_cfg->ifname);
@@ -381,8 +384,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(wan_cfg->ifname);
     strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
-    memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
-    memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
+    /* MAC cho WAN sẽ được forwarder set động qua ARP cache. */
 
     if (iface->ifindex == 0) {
         fprintf(stderr, "WAN Interface %s not found\n", wan_cfg->ifname);
@@ -711,8 +713,10 @@ int interface_send(struct xsk_interface *iface,
     memcpy(tx_buf, pkt_data, pkt_len);
 
     eth = (struct ether_header *)tx_buf;
-    memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
-    memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+    if (mac_is_nonzero6(iface->dst_mac))
+        memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+    if (mac_is_nonzero6(iface->src_mac))
+        memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
 
     xsk_ring_prod__tx_desc(&iface->tx, idx)->addr = addr;
     xsk_ring_prod__tx_desc(&iface->tx, idx)->len = pkt_len;
@@ -834,8 +838,10 @@ int interface_send_batch(struct xsk_interface *iface,
     memcpy(tx_buf, pkt_data, pkt_len);
 
     eth = (struct ether_header *)tx_buf;
-    memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
-    memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+    if (mac_is_nonzero6(iface->dst_mac))
+        memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+    if (mac_is_nonzero6(iface->src_mac))
+        memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
 
     xsk_ring_prod__tx_desc(&iface->tx, idx)->addr = addr;
     xsk_ring_prod__tx_desc(&iface->tx, idx)->len = pkt_len;
@@ -1069,8 +1075,10 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
         memcpy(tx_buf, pkt_data, pkt_len);
 
         eth = (struct ether_header *)tx_buf;
-        memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
-        memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+        if (mac_is_nonzero6(iface->dst_mac))
+            memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+        if (mac_is_nonzero6(iface->src_mac))
+            memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
 
         xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
         xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;

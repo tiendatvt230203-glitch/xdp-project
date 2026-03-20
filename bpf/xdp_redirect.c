@@ -4,7 +4,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-/* Must match userspace inc/config.h */
+
 #define MAX_SRC_NETS 32
 #define MAX_DST_NETS 32
 
@@ -91,7 +91,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Match any src in configured src_nets */
+
     int match_src = 0;
 #pragma unroll
     for (int i = 0; i < MAX_SRC_NETS; i++) {
@@ -107,7 +107,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Match any dst in configured dst_nets */
+
     int match_dst = 0;
 #pragma unroll
     for (int j = 0; j < MAX_DST_NETS; j++) {
@@ -123,7 +123,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Both src and dst matched → redirect to AF_XDP */
+
     __u32 qid = ctx->rx_queue_index;
     int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
     if (!sock) {
