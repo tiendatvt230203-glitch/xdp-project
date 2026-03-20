@@ -1496,6 +1496,18 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             pthread_detach(tid);
             fprintf(stderr, "[ARP-WAN] ready on %s (ip=%u)\n",
                     g_arp_wan[i].ifname, (unsigned)ntohl(g_arp_wan[i].if_ip));
+            /* Boot-time MAC probe for "next-hop" on this WAN.
+             * We use a fixed public IP so we typically resolve the default-gateway
+             * MAC on off-link routes (useful for quick manual verification). */
+            uint8_t mac_probe[6] = {0};
+            uint32_t probe_dst_net = 0x08080808; /* 8.8.8.8 in network-byte-order */
+            fprintf(stderr,
+                    "[ARP-WAN] probe start if=%s dst_ip=%u\n",
+                    g_arp_wan[i].ifname, (unsigned)ntohl(probe_dst_net));
+            int ok = wan_resolve_dst_mac(i, probe_dst_net, mac_probe);
+            fprintf(stderr,
+                    "[ARP-WAN] probe done  if=%s dst_ip=%u ok=%d\n",
+                    g_arp_wan[i].ifname, (unsigned)ntohl(probe_dst_net), ok);
         }
         fwd->wan_count++;
     }
