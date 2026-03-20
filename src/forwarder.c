@@ -18,6 +18,10 @@
 #include <netpacket/packet.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <linux/rtnetlink.h>
+#include <linux/netlink.h>
+#include <linux/route.h>
 
 #define NUM_WORKERS 4
 #define WORKER_RING_SIZE 4096
