@@ -623,74 +623,54 @@ static int decrypt_packet_auto_by_action(struct forwarder *fwd,
         int transport_off = l3_off + ip_hdr_len;
         const uint8_t L4_TUNNEL_MAGIC = 0xA5;
 
-        /* TCP: tunnel may be right after IP (full-segment encrypt, incl. SYN) or after TCP header (legacy). */
-        int tunnel_off = -1;
+        int tcp_hdr_len = 0;
         if (ip_proto == 6) {
             if (*pkt_len < (uint32_t)(transport_off + 20))
                 return 0;
-            uint8_t tcp_hdr_len = ((pkt[transport_off + 12] >> 4) & 0x0F) * 4;
+            tcp_hdr_len = ((pkt[transport_off + 12] >> 4) & 0x0F) * 4;
             if (tcp_hdr_len < 20)
-                return 0;
-
-            int matched = 0;
-            for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-                const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-                if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4 || cp->nonce_size <= 0)
-                    continue;
-                int ns = cp->nonce_size;
-                if (transport_off + ns < (int)*pkt_len &&
-                    pkt[transport_off + ns] == L4_TUNNEL_MAGIC) {
-                    tunnel_off = transport_off;
-                    matched = 1;
-                    break;
-                }
-                int legacy_tun = transport_off + tcp_hdr_len;
-                if (legacy_tun + ns < (int)*pkt_len &&
-                    pkt[legacy_tun + ns] == L4_TUNNEL_MAGIC) {
-                    tunnel_off = legacy_tun;
-                    matched = 1;
-                    break;
-                }
-            }
-            if (!matched)
-                return 0;
-        } else {
-            tunnel_off = transport_off + 8;
-            int matched = 0;
-            for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-                const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-                if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4 || cp->nonce_size <= 0)
-                    continue;
-                int ns = cp->nonce_size;
-                if (tunnel_off + ns < (int)*pkt_len &&
-                    pkt[tunnel_off + ns] == L4_TUNNEL_MAGIC) {
-                    matched = 1;
-                    break;
-                }
-            }
-            if (!matched)
                 return 0;
         }
 
-        if (tunnel_off < 0 || (uint32_t)tunnel_off >= *pkt_len)
-            return 0;
-
-        uint8_t policy_id = (uint8_t)(pkt[tunnel_off] & 0x7F);
-
+        /* Strict match: only decrypt when magic + policy_id match same L4 policy.
+         * This avoids false-positive "magic" hits on plain TCP bytes. */
         for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
             const struct crypto_policy *cp = &fwd->cfg->policies[pi];
             if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4)
                 continue;
-            if (!g_policy_crypto_ctx_ready[pi])
+            if (!g_policy_crypto_ctx_ready[pi] || cp->nonce_size <= 0)
                 continue;
 
-            if ((uint8_t)(cp->id & 0x7F) != policy_id)
-                continue;
-            if (cp->nonce_size <= 0)
-                continue;
-            if (tunnel_off + cp->nonce_size >= (int)*pkt_len)
-                continue;
-            if (pkt[tunnel_off + cp->nonce_size] != L4_TUNNEL_MAGIC)
+            int ns = cp->nonce_size;
+            int tunnel_off = -1;
+
+            if (ip_proto == 6) {
+                int off_new = transport_off;
+                if (off_new + ns < (int)*pkt_len &&
+                    pkt[off_new + ns] == L4_TUNNEL_MAGIC &&
+                    ((uint8_t)(pkt[off_new] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
+                    ((pkt[off_new] & 0x80) == 0)) {
+                    tunnel_off = off_new;
+                } else {
+                    int off_legacy = transport_off + tcp_hdr_len;
+                    if (off_legacy + ns < (int)*pkt_len &&
+                        pkt[off_legacy + ns] == L4_TUNNEL_MAGIC &&
+                        ((uint8_t)(pkt[off_legacy] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
+                        ((pkt[off_legacy] & 0x80) == 0)) {
+                        tunnel_off = off_legacy;
+                    }
+                }
+            } else {
+                int off_udp = transport_off + 8;
+                if (off_udp + ns < (int)*pkt_len &&
+                    pkt[off_udp + ns] == L4_TUNNEL_MAGIC &&
+                    ((uint8_t)(pkt[off_udp] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
+                    ((pkt[off_udp] & 0x80) == 0)) {
+                    tunnel_off = off_udp;
+                }
+            }
+
+            if (tunnel_off < 0)
                 continue;
 
             apply_crypto_params_from_policy(cp);
@@ -701,7 +681,8 @@ static int decrypt_packet_auto_by_action(struct forwarder *fwd,
             return 0;
         }
 
-        return -1;
+        /* Not an L4-encrypted packet for any configured policy => pass through. */
+        return 0;
     }
 
     /* Fallback brute-force for non-implemented cases (mainly L4). */

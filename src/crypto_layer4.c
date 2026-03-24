@@ -100,24 +100,15 @@ int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     int transport_off = l3_off + ip_hdr_len;
     size_t remaining = pkt_len - (size_t)transport_off;
 
-    int enc_off;
-    size_t enc_len;
+    int transport_hdr_size = get_transport_hdr_size(packet + transport_off, ip_proto, remaining);
+    if (transport_hdr_size < 0)
+        return (int)pkt_len;
 
-    if (ip_proto == 6) {
-        /* TCP: encrypt full segment (header + options + payload) so SYN/ACK/PSH are never cleartext. */
-        enc_off = transport_off;
-        enc_len = pkt_len - (size_t)transport_off;
-        if (enc_len < 20)
-            return -1;
-    } else {
-        /* UDP: encrypt payload only (after 8-byte UDP header). */
-        if (remaining < 8)
-            return -1;
-        enc_off = transport_off + 8;
-        enc_len = pkt_len - (size_t)enc_off;
-        if (enc_len == 0)
-            return (int)pkt_len;
-    }
+    /* L4 mode here means: keep L2/L3/L4 headers visible, encrypt only L4 payload (L7 data). */
+    int enc_off = transport_off + transport_hdr_size;
+    size_t enc_len = pkt_len - (size_t)enc_off;
+    if (enc_len == 0)
+        return (int)pkt_len;
 
     int is_gcm = (packet_crypto_get_mode() == CRYPTO_MODE_GCM);
     int nonce_size = packet_crypto_get_nonce_size();
@@ -185,32 +176,14 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     int nonce_size = packet_crypto_get_nonce_size();
     int tunnel_hdr_size = packet_crypto_get_tunnel_hdr_size();
 
-    int tunnel_off;
-    int tcp_new_layout = 0;
+    int transport_hdr_size = get_transport_hdr_size(packet + transport_off, ip_proto, remaining);
+    if (transport_hdr_size < 0)
+        return (int)pkt_len;
 
-    if (ip_proto == 6) {
-        if (remaining >= (size_t)tunnel_hdr_size &&
-            pkt_len >= (size_t)(transport_off + tunnel_hdr_size) &&
-            l4_is_tunnel_header(packet + transport_off, nonce_size)) {
-            tunnel_off = transport_off;
-            tcp_new_layout = 1;
-        } else {
-            int transport_hdr_size = get_transport_hdr_size(packet + transport_off, ip_proto, remaining);
-            if (transport_hdr_size < 0)
-                return (int)pkt_len;
-            tunnel_off = transport_off + transport_hdr_size;
-            if (pkt_len < (size_t)(tunnel_off + tunnel_hdr_size) ||
-                !l4_is_tunnel_header(packet + tunnel_off, nonce_size))
-                return (int)pkt_len;
-        }
-    } else {
-        if (remaining < 8)
-            return (int)pkt_len;
-        tunnel_off = transport_off + 8;
-        if (pkt_len < (size_t)(tunnel_off + tunnel_hdr_size) ||
-            !l4_is_tunnel_header(packet + tunnel_off, nonce_size))
-            return (int)pkt_len;
-    }
+    int tunnel_off = transport_off + transport_hdr_size;
+    if (pkt_len < (size_t)(tunnel_off + tunnel_hdr_size) ||
+        !l4_is_tunnel_header(packet + tunnel_off, nonce_size))
+        return (int)pkt_len;
 
     uint8_t proto_flag;
     uint8_t nonce[16];
@@ -228,30 +201,14 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     size_t enc_len;
     uint8_t tag[AES128_GCM_TAG_SIZE];
 
-    if (tcp_new_layout) {
-        uint16_t ip_tot = ((uint16_t)packet[l3_off + 2] << 8) | packet[l3_off + 3];
-        int ip_payload_len = (int)ip_tot - ip_hdr_len;
-        int after_tunnel = ip_payload_len - tunnel_hdr_size;
-        if (after_tunnel < 0)
+    size_t total_after_tunnel = pkt_len - (size_t)enc_off;
+    if (is_gcm) {
+        if (total_after_tunnel < AES128_GCM_TAG_SIZE)
             return -1;
-        if (is_gcm) {
-            if (after_tunnel < (int)AES128_GCM_TAG_SIZE)
-                return -1;
-            enc_len = (size_t)(after_tunnel - AES128_GCM_TAG_SIZE);
-            memcpy(tag, packet + enc_off + enc_len, AES128_GCM_TAG_SIZE);
-        } else {
-            enc_len = (size_t)after_tunnel;
-        }
+        enc_len = total_after_tunnel - AES128_GCM_TAG_SIZE;
+        memcpy(tag, packet + enc_off + enc_len, AES128_GCM_TAG_SIZE);
     } else {
-        size_t total_after_tunnel = pkt_len - (size_t)enc_off;
-        if (is_gcm) {
-            if (total_after_tunnel < AES128_GCM_TAG_SIZE)
-                return -1;
-            enc_len = total_after_tunnel - AES128_GCM_TAG_SIZE;
-            memcpy(tag, packet + enc_off + enc_len, AES128_GCM_TAG_SIZE);
-        } else {
-            enc_len = total_after_tunnel;
-        }
+        enc_len = total_after_tunnel;
     }
 
     uint8_t backup[2048];
