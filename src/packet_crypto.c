@@ -507,21 +507,24 @@ static EVP_CIPHER_CTX *get_gcm_dec_ctx(void) {
 }
 
 int packet_crypto_get_tunnel_hdr_size(void) {
-    return g_nonce_size + 1;
+    return g_nonce_size + 2;
 }
 
 void crypto_write_l3_tunnel_header(uint8_t *buf, const uint8_t *nonce,
-                                    int nonce_size, uint8_t orig_proto) {
+                                    int nonce_size, uint8_t policy_id,
+                                    uint8_t orig_proto) {
     memcpy(buf, nonce, nonce_size);
-    buf[nonce_size] = orig_proto;
+    buf[nonce_size] = policy_id;
+    buf[nonce_size + 1] = orig_proto;
 }
 
 void crypto_read_l3_tunnel_header(const uint8_t *buf, int nonce_size,
                                    uint8_t *nonce_out, uint8_t *proto_flag,
-                                   uint8_t *orig_proto) {
+                                   uint8_t *policy_id, uint8_t *orig_proto) {
     memcpy(nonce_out, buf, nonce_size);
     if (proto_flag) *proto_flag = buf[0] >> 7;
-    if (orig_proto) *orig_proto = buf[nonce_size];
+    if (policy_id) *policy_id = (uint8_t)(buf[nonce_size] & 0x7F);
+    if (orig_proto) *orig_proto = buf[nonce_size + 1];
 }
 
 void packet_crypto_set_ethertype(uint16_t fake_ipv4, uint16_t fake_ipv6) {
@@ -767,9 +770,8 @@ void crypto_generate_nonce(uint32_t counter, uint8_t proto_flag,
                            uint8_t *out_nonce, int *out_nonce_len) {
     const int ns = g_nonce_size;
 
-    /* Counter + proto flag (4 bytes, unique per packet) */
-    /* Embed policy_id (lower 7 bits) while keeping proto_flag in bit7. */
-    out_nonce[0] = (proto_flag << 7) | (g_policy_id & 0x7F);
+    /* Counter + proto flag (4 bytes, unique per packet). */
+    out_nonce[0] = (proto_flag << 7) | ((counter >> 24) & 0x7F);
     out_nonce[1] = (counter >> 16) & 0xFF;
     out_nonce[2] = (counter >> 8) & 0xFF;
     out_nonce[3] = counter & 0xFF;
@@ -800,14 +802,17 @@ void crypto_nonce_to_iv(const uint8_t *nonce, int nonce_size,
 }
 
 void crypto_write_counter(uint8_t *packet, const uint8_t *nonce,
-                          int nonce_size, uint8_t marker_byte) {
+                          int nonce_size, uint8_t marker_byte, uint8_t policy_id) {
     packet[12] = marker_byte;
-    memcpy(packet + 13, nonce, nonce_size);
+    packet[13] = (uint8_t)(policy_id & 0x7F);
+    memcpy(packet + 14, nonce, nonce_size);
 }
 
 void crypto_read_counter(const uint8_t *packet, int nonce_size,
-                         uint8_t *nonce_out, uint8_t *proto_flag) {
-    memcpy(nonce_out, packet + 13, nonce_size);
+                         uint8_t *nonce_out, uint8_t *policy_id, uint8_t *proto_flag) {
+    if (policy_id)
+        *policy_id = (uint8_t)(packet[13] & 0x7F);
+    memcpy(nonce_out, packet + 14, nonce_size);
     if (proto_flag)
         *proto_flag = nonce_out[0] >> 7;
 }

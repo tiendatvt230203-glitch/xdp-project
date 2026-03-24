@@ -164,7 +164,7 @@ uint16_t packet_crypto_get_fake_ethertype_ipv6(void);
 void packet_crypto_set_fake_protocol(uint8_t proto);
 uint8_t packet_crypto_get_fake_protocol(void);
 
-/* Used to embed a policy id into tunnel nonce bytes (L2/L3/L4). */
+/* Policy id is carried in dedicated tunnel-header fields. */
 void packet_crypto_set_policy_id(uint8_t policy_id);
 uint8_t packet_crypto_get_policy_id(void);
 
@@ -173,10 +173,11 @@ uint8_t packet_crypto_get_policy_id(void);
 int packet_crypto_get_tunnel_hdr_size(void);
 
 void crypto_write_l3_tunnel_header(uint8_t *buf, const uint8_t *nonce,
-                                    int nonce_size, uint8_t orig_proto);
+                                    int nonce_size, uint8_t policy_id,
+                                    uint8_t orig_proto);
 void crypto_read_l3_tunnel_header(const uint8_t *buf, int nonce_size,
                                    uint8_t *nonce_out, uint8_t *proto_flag,
-                                   uint8_t *orig_proto);
+                                   uint8_t *policy_id, uint8_t *orig_proto);
 
 void packet_crypto_set_encrypt_layer(int layer);
 
@@ -210,9 +211,9 @@ int crypto_aes_ctr_with_key(const uint8_t key[AES_MAX_KEY_SIZE],
                             uint8_t *data, int len);
 
 void crypto_write_counter(uint8_t *packet, const uint8_t *nonce,
-                          int nonce_size, uint8_t marker_byte);
+                          int nonce_size, uint8_t marker_byte, uint8_t policy_id);
 void crypto_read_counter(const uint8_t *packet, int nonce_size,
-                         uint8_t *nonce_out, uint8_t *proto_flag);
+                         uint8_t *nonce_out, uint8_t *policy_id, uint8_t *proto_flag);
 
 void crypto_restore_ipv4_header(uint8_t *packet, size_t pkt_len);
 void crypto_restore_ipv6_header(uint8_t *packet, size_t pkt_len);

@@ -141,7 +141,8 @@ static int build_and_encrypt_fragment(struct packet_crypto_ctx *ctx,
             transport_len);
 
     uint8_t flagged_proto = orig_proto | FRAG_FLAG_BIT;
-    crypto_write_l3_tunnel_header(out_buf + tunnel_off, nonce, nonce_size, flagged_proto);
+    crypto_write_l3_tunnel_header(out_buf + tunnel_off, nonce, nonce_size,
+                                  0, flagged_proto);
 
     frag_write_hdr(out_buf + tunnel_off + tunnel_hdr_size, pkt_id, frag_index);
 
@@ -304,7 +305,7 @@ int frag_decrypt_fragment(struct packet_crypto_ctx *ctx,
     uint8_t rd_proto_flag, orig_proto_raw;
     uint8_t nonce[16];
     crypto_read_l3_tunnel_header(packet + tunnel_off, nonce_size,
-                                  nonce, &rd_proto_flag, &orig_proto_raw);
+                                  nonce, &rd_proto_flag, NULL, &orig_proto_raw);
 
     uint8_t orig_proto = orig_proto_raw & ~FRAG_FLAG_BIT;
 

@@ -83,7 +83,8 @@ int crypto_layer3_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
         memmove(packet + tunnel_off + tunnel_hdr_size, packet + tunnel_off, payload_len);
     }
 
-    crypto_write_l3_tunnel_header(packet + tunnel_off, nonce, nonce_size, orig_proto);
+    crypto_write_l3_tunnel_header(packet + tunnel_off, nonce, nonce_size,
+                                  packet_crypto_get_policy_id(), orig_proto);
     uint8_t fake_proto = packet_crypto_get_fake_protocol();
     if (proto_flag == PROTO_FLAG_IPV4) packet[IPV4_PROTO_OFF] = fake_proto;
     else packet[IPV6_NEXTHDR_OFF] = fake_proto;
@@ -140,7 +141,7 @@ int crypto_layer3_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     uint8_t rd_proto_flag, orig_proto;
     uint8_t nonce[16];
     crypto_read_l3_tunnel_header(packet + tunnel_off, nonce_size,
-                                  nonce, &rd_proto_flag, &orig_proto);
+                                  nonce, &rd_proto_flag, NULL, &orig_proto);
 
     if (proto_flag == PROTO_FLAG_IPV4)
         packet[IPV4_PROTO_OFF] = orig_proto;

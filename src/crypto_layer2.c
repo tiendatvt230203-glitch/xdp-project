@@ -37,8 +37,8 @@ int crypto_layer2_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     if (unlikely(!ctx || !ctx->initialized || !packet || pkt_len < MIN_ETH_PKT)) return -1;
 
     const int nonce_size = packet_crypto_get_nonce_size();
-    const int l2_hdr_extra = nonce_size - 1;
-    const int l2_enc_start = 13 + nonce_size;
+    const int l2_hdr_extra = nonce_size;
+    const int l2_enc_start = 14 + nonce_size;
 
     uint16_t ether_type = ((uint16_t)packet[12] << 8) | packet[13];
     uint8_t proto_flag;
@@ -68,7 +68,8 @@ int crypto_layer2_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
 
     memmove(packet + l2_enc_start, packet + ETH_HEADER_SIZE, payload_len);
 
-    crypto_write_counter(packet, nonce, nonce_size, (uint8_t)(fake_etype >> 8));
+    crypto_write_counter(packet, nonce, nonce_size, (uint8_t)(fake_etype >> 8),
+                         packet_crypto_get_policy_id());
 
     if (likely(is_gcm)) {
         uint8_t tag[AES128_GCM_TAG_SIZE];
@@ -92,7 +93,7 @@ int crypto_layer2_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     if (unlikely(!ctx || !ctx->initialized || !packet)) return -1;
 
     const int nonce_size = packet_crypto_get_nonce_size();
-    const int l2_enc_start = 13 + nonce_size;
+    const int l2_enc_start = 14 + nonce_size;
 
     if (unlikely(pkt_len < (size_t)l2_enc_start)) return -1;
 
@@ -103,9 +104,11 @@ int crypto_layer2_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     if (!((fake_ipv4 && pkt_marker == (uint8_t)(fake_ipv4 >> 8)) ||
           (fake_ipv6 && pkt_marker == (uint8_t)(fake_ipv6 >> 8)))) return (int)pkt_len;
 
+    uint8_t policy_id;
     uint8_t proto_flag;
     uint8_t nonce[16];
-    crypto_read_counter(packet, nonce_size, nonce, &proto_flag);
+    crypto_read_counter(packet, nonce_size, nonce, &policy_id, &proto_flag);
+    (void)policy_id;
     const int is_ipv4 = (proto_flag == PROTO_FLAG_IPV4);
     const int is_gcm = (packet_crypto_get_mode() == CRYPTO_MODE_GCM);
 
