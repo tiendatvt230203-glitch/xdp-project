@@ -99,8 +99,11 @@ struct local_config {
 
 struct wan_config {
     char ifname[IF_NAMESIZE];
+    uint32_t src_ip;      /* local WAN IPv4 (network byte order) */
+    uint32_t dst_ip;      /* peer/next-hop WAN IPv4 (network byte order) */
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
+    uint32_t next_hop_ip; /* IPv4 next-hop for WAN L2 rewrite (network byte order) */
     uint32_t window_size;
     uint32_t umem_mb;
     uint32_t ring_size;

@@ -31,13 +31,13 @@ INSERT INTO xdp_local_configs (
 INSERT INTO xdp_wan_configs (
     config_id,
     ifname,
-    src_mac,
-    dst_mac,
+    src_ip,
+    dst_ip,
     window_size_kb
 ) VALUES
-(30, 'enp4s0', '20:7c:14:f8:0c:cf', '20:7c:14:f8:0d:4d', 100),
-(30, 'enp5s0', '20:7c:14:f8:0c:d0', '20:7c:14:f8:0d:4e', 100),
-(30, 'enp6s0', '20:7c:14:f8:0c:d1', '20:7c:14:f8:0d:4f', 100);
+(30, 'enp4s0', '192.168.11.1/24',  '192.168.11.2/24',  100),
+(30, 'enp5s0', '192.168.131.1/24', '192.168.131.2/24', 100),
+(30, 'enp6s0', '192.168.203.1/24', '192.168.203.2/24', 100);
 
 -- Profile traffic rules (chỉ cần khớp src/dst để chọn đúng profile)
 INSERT INTO xdp_profiles (

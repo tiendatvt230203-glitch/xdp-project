@@ -39,6 +39,22 @@ static int parse_port_range(const char *v, int *from_out, int *to_out) {
     return -1;
 }
 
+static int parse_ipv4_addr(const char *v, uint32_t *out_ip) {
+    if (!v || !out_ip || v[0] == '\0')
+        return -1;
+    char buf[64];
+    strncpy(buf, v, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *slash = strchr(buf, '/');
+    if (slash)
+        *slash = '\0';
+    struct in_addr a;
+    if (inet_pton(AF_INET, buf, &a) != 1)
+        return -1;
+    *out_ip = a.s_addr;
+    return 0;
+}
+
 static uint8_t parse_protocol_name(const char *v) {
     if (str_is_any(v)) return POLICY_PROTO_ANY;
     if (strcasecmp(v, "tcp") == 0) return 6;
@@ -380,19 +396,51 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
         }
         strncpy(wan->ifname, v, IF_NAMESIZE - 1);
 
-        int src_col = PQfnumber(res, "src_mac");
-        int dst_col = PQfnumber(res, "dst_mac");
-        if (src_col >= 0) {
-            v = PQgetvalue(res, row, src_col);
+        int src_ip_col = PQfnumber(res, "src_ip");
+        int dst_ip_col = PQfnumber(res, "dst_ip");
+        if (src_ip_col >= 0) {
+            v = PQgetvalue(res, row, src_ip_col);
+            if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->src_ip) != 0) {
+                fprintf(stderr, "[DB WAN] Invalid src_ip: %s\n", v);
+                return -1;
+            }
+        }
+        if (dst_ip_col >= 0) {
+            v = PQgetvalue(res, row, dst_ip_col);
+            if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->dst_ip) != 0) {
+                fprintf(stderr, "[DB WAN] Invalid dst_ip: %s\n", v);
+                return -1;
+            }
+            if (wan->dst_ip != 0)
+                wan->next_hop_ip = wan->dst_ip;
+        }
+
+        /* Backward-compatible MAC columns (legacy schema). */
+        int src_mac_col = PQfnumber(res, "src_mac");
+        int dst_mac_col = PQfnumber(res, "dst_mac");
+        if (src_mac_col >= 0) {
+            v = PQgetvalue(res, row, src_mac_col);
             if (v && v[0] != '\0' && parse_mac(v, wan->src_mac) != 0) {
                 fprintf(stderr, "[DB WAN] Invalid src_mac: %s\n", v);
                 return -1;
             }
         }
-        if (dst_col >= 0) {
-            v = PQgetvalue(res, row, dst_col);
+        if (dst_mac_col >= 0) {
+            v = PQgetvalue(res, row, dst_mac_col);
             if (v && v[0] != '\0' && parse_mac(v, wan->dst_mac) != 0) {
                 fprintf(stderr, "[DB WAN] Invalid dst_mac: %s\n", v);
+                return -1;
+            }
+        }
+
+        /* Optional per-WAN next-hop IPv4 for ARP-based L2 rewrite. */
+        int nh_col = PQfnumber(res, "next_hop_ip");
+        if (nh_col < 0) nh_col = PQfnumber(res, "gateway_ip");
+        if (nh_col < 0) nh_col = PQfnumber(res, "peer_ip");
+        if (nh_col >= 0) {
+            v = PQgetvalue(res, row, nh_col);
+            if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->next_hop_ip) != 0) {
+                fprintf(stderr, "[DB WAN] Invalid next_hop_ip/gateway_ip/peer_ip: %s\n", v);
                 return -1;
             }
         }
@@ -567,9 +615,17 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, src_mac, dst_mac, window_size_kb "
+            "SELECT ifname, src_ip, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
+
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            PQclear(res);
+            res = PQexecParams(conn,
+                "SELECT ifname, src_mac, dst_mac, window_size_kb "
+                "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
+                1, NULL, params, NULL, NULL, 0);
+        }
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             PQclear(res);

@@ -13,7 +13,7 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 4);
+    __uint(max_entries, 8);
     __type(key, int);
     __type(value, __u64);
 } wan_stats_map SEC(".maps");
@@ -29,6 +29,7 @@ struct {
 #define STAT_NON_IP     1
 #define STAT_REDIRECT   2
 #define STAT_NO_SOCK    3
+#define STAT_ARP_PASS   4
 
 static __always_inline void inc_stat(int idx)
 {
@@ -50,6 +51,12 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
 
     __u16 proto = eth->h_proto;
+
+    /* Keep ARP in kernel stack for next-hop MAC resolution. */
+    if (proto == __constant_htons(ETH_P_ARP)) {
+        inc_stat(STAT_ARP_PASS);
+        return XDP_PASS;
+    }
 
     if (proto == __constant_htons(ETH_P_IP))
         goto redirect;

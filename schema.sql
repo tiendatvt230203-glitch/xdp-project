@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     id SERIAL PRIMARY KEY,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL,
-    src_mac VARCHAR(32) DEFAULT '',
-    dst_mac VARCHAR(32) DEFAULT '',
+    src_ip VARCHAR(32) DEFAULT '',
+    dst_ip VARCHAR(32) DEFAULT '',
     window_size_kb INT DEFAULT 8192
 );
 

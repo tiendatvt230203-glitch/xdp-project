@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <net/if_arp.h>
 #include <netinet/if_ether.h>
+#include <arpa/inet.h>
 
 #define NUM_WORKERS 4
 #define WORKER_RING_SIZE 4096
@@ -129,6 +130,7 @@ struct arp_cache {
 };
 
 static struct arp_cache g_arp[MAX_INTERFACES];
+static struct arp_cache g_wan_arp[MAX_INTERFACES];
 static int g_arp_inited = 0;
 
 static int mac_is_nonzero6(const uint8_t mac[6]) {
@@ -351,6 +353,64 @@ static int arp_init_for_local(struct arp_cache *c, const struct xsk_interface *l
 
     arp_cache_load(c);
     return 0;
+}
+
+static int set_wan_l2_addrs(struct forwarder *fwd, int wan_idx, uint8_t *pkt) {
+    if (!fwd || !pkt || wan_idx < 0 || wan_idx >= fwd->wan_count)
+        return -1;
+
+    struct xsk_interface *wan = &fwd->wans[wan_idx];
+    const struct wan_config *wan_cfg = &fwd->cfg->wans[wan_idx];
+
+    if (wan_cfg->next_hop_ip != 0) {
+        uint8_t dst_mac[6];
+        if (arp_cache_lookup(&g_wan_arp[wan_idx], wan_cfg->next_hop_ip, dst_mac)) {
+            memcpy(pkt, dst_mac, 6);
+            memcpy(pkt + 6, g_wan_arp[wan_idx].if_mac, 6);
+            return 0;
+        }
+        arp_send_request(&g_wan_arp[wan_idx], wan_cfg->next_hop_ip);
+        return -1;
+    }
+
+    /* Backward-compatible fallback: static WAN MACs. */
+    memcpy(pkt, wan->dst_mac, 6);
+    memcpy(pkt + 6, wan->src_mac, 6);
+    return 0;
+}
+
+static void log_wan_next_hop_mac(struct forwarder *fwd, int wan_idx) {
+    if (!fwd || wan_idx < 0 || wan_idx >= fwd->wan_count)
+        return;
+    const struct wan_config *wc = &fwd->cfg->wans[wan_idx];
+    if (wc->next_hop_ip == 0)
+        return;
+
+    char ipbuf[INET_ADDRSTRLEN] = {0};
+    struct in_addr a = { .s_addr = wc->next_hop_ip };
+    inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
+
+    uint8_t mac[6];
+    for (int tries = 0; tries < 10; tries++) {
+        if (arp_cache_lookup(&g_wan_arp[wan_idx], wc->next_hop_ip, mac)) {
+            fprintf(stderr,
+                    "[WAN ARP] if=%s src_ip=%u dst_ip=%u next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    fwd->wans[wan_idx].ifname,
+                    (unsigned)ntohl(wc->src_ip),
+                    (unsigned)ntohl(wc->dst_ip),
+                    ipbuf,
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            return;
+        }
+        arp_send_request(&g_wan_arp[wan_idx], wc->next_hop_ip);
+        usleep(100000);
+    }
+    fprintf(stderr,
+            "[WAN ARP] if=%s src_ip=%u dst_ip=%u next_hop=%s mac=UNRESOLVED\n",
+            fwd->wans[wan_idx].ifname,
+            (unsigned)ntohl(wc->src_ip),
+            (unsigned)ntohl(wc->dst_ip),
+            ipbuf);
 }
 
 struct packet_job {
@@ -943,8 +1003,10 @@ static void *local_queue_thread_no_crypto(void *arg) {
             int tq = wan_tx_q[wan_idx];
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
 
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                continue;
+            }
 
             if (interface_send_batch_queue(wan, tq, pkt, pkt_lens[i]) == 0) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
@@ -1109,8 +1171,10 @@ static void *local_queue_thread_l2(void *arg) {
             uint32_t pkt_len = pkt_lens[i];
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
 
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                continue;
+            }
 
             const struct crypto_policy *cp = select_crypto_policy_for_packet(fwd,
                                                                              src_ip, dst_ip,
@@ -1611,8 +1675,10 @@ static void *worker_thread(void *arg) {
 
             if (bypass_crypto) {
                 uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-                memcpy(pkt, wan->dst_mac, 6);
-                memcpy(pkt + 6, wan->src_mac, 6);
+                if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    goto release_local;
+                }
 
                 if (interface_send_batch_queue(wan, tq, job.pkt_ptr, pkt_len) == 0) {
                     __sync_fetch_and_add(&fwd->local_to_wan, 1);
@@ -1626,8 +1692,10 @@ static void *worker_thread(void *arg) {
 
         if (!crypto_enabled) {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             if (interface_send_batch_queue(wan, tq, pkt, pkt_len) == 0) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
@@ -1638,8 +1706,10 @@ static void *worker_thread(void *arg) {
         } else if (crypto_layer == 3 && 0) {
 
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             uint32_t f1_len = 0, f2_len = 0;
             if (frag_split_and_encrypt(use_ctx,
@@ -1650,10 +1720,11 @@ static void *worker_thread(void *arg) {
                 goto release_local;
             }
 
-            memcpy(frag1_buf, wan->dst_mac, 6);
-            memcpy(frag1_buf + 6, wan->src_mac, 6);
-            memcpy(frag2_buf, wan->dst_mac, 6);
-            memcpy(frag2_buf + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, frag1_buf) != 0 ||
+                set_wan_l2_addrs(fwd, wan_idx, frag2_buf) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             uint32_t wire_total = f1_len + f2_len;
             if (wire_total > pkt_len) {
@@ -1678,8 +1749,10 @@ static void *worker_thread(void *arg) {
         } else if (crypto_layer == 2 && 0) {
 
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             uint32_t f1_len = 0, f2_len = 0;
             if (frag_split_and_encrypt_l2(&crypto_ctx,
@@ -1690,10 +1763,11 @@ static void *worker_thread(void *arg) {
                 goto release_local;
             }
 
-            memcpy(frag1_buf, wan->dst_mac, 6);
-            memcpy(frag1_buf + 6, wan->src_mac, 6);
-            memcpy(frag2_buf, wan->dst_mac, 6);
-            memcpy(frag2_buf + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, frag1_buf) != 0 ||
+                set_wan_l2_addrs(fwd, wan_idx, frag2_buf) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             uint32_t wire_total = f1_len + f2_len;
             if (wire_total > pkt_len) {
@@ -1717,8 +1791,10 @@ static void *worker_thread(void *arg) {
 
         } else {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            memcpy(pkt, wan->dst_mac, 6);
-            memcpy(pkt + 6, wan->src_mac, 6);
+            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                goto release_local;
+            }
 
             int new_len = -1;
             if (cp) {
@@ -1903,6 +1979,21 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             goto err_wans;
         }
         fwd->wan_count++;
+    }
+
+    /* Optional WAN next-hop ARP (per WAN interface). */
+    for (int i = 0; i < fwd->wan_count; i++) {
+        if (cfg->wans[i].next_hop_ip == 0)
+            continue;
+        if (arp_init_for_local(&g_wan_arp[i], &fwd->wans[i]) == 0) {
+            pthread_t tid;
+            pthread_create(&tid, NULL, arp_listener_thread, &g_wan_arp[i]);
+            pthread_detach(tid);
+            g_arp_inited = 1;
+            log_wan_next_hop_mac(fwd, i);
+        } else {
+            fprintf(stderr, "[ARP] WARN: cannot init WAN ARP on %s\n", cfg->wans[i].ifname);
+        }
     }
 
     return 0;
