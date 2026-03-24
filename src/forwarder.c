@@ -1979,12 +1979,21 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             goto err_wans;
         }
         fwd->wan_count++;
+        if (cfg->wans[i].next_hop_ip != 0) {
+            /* Ensure TX path does not override ARP-resolved MAC with legacy static MAC fields. */
+            memset(fwd->wans[i].dst_mac, 0, MAC_LEN);
+            memset(fwd->wans[i].src_mac, 0, MAC_LEN);
+        }
     }
 
     /* Optional WAN next-hop ARP (per WAN interface). */
     for (int i = 0; i < fwd->wan_count; i++) {
-        if (cfg->wans[i].next_hop_ip == 0)
+        if (cfg->wans[i].next_hop_ip == 0) {
+            fprintf(stderr,
+                    "[WAN ARP] if=%s next_hop_ip=0 -> using static/fallback MAC path\n",
+                    cfg->wans[i].ifname);
             continue;
+        }
         if (arp_init_for_local(&g_wan_arp[i], &fwd->wans[i]) == 0) {
             pthread_t tid;
             pthread_create(&tid, NULL, arp_listener_thread, &g_wan_arp[i]);
@@ -2404,4 +2413,28 @@ void forwarder_print_stats(struct forwarder *fwd) {
     for (int i = 0; i < nq && i < FORWARDER_MAX_LOCAL_QUEUES; i++)
         fprintf(stdout, " q%d=%lu", i, (unsigned long)fwd->dropped_local_tx_fail_by_queue[i]);
     fprintf(stdout, " tx_wait_loops=%lu\n", (unsigned long)tx_wait_loops);
+
+    for (int w = 0; w < fwd->wan_count; w++) {
+        const struct wan_config *wc = &fwd->cfg->wans[w];
+        if (wc->next_hop_ip == 0) {
+            fprintf(stdout, "[WAN ARP] if=%s next_hop=disabled (static/fallback path)\n",
+                    fwd->wans[w].ifname);
+            continue;
+        }
+
+        char ipbuf[INET_ADDRSTRLEN] = {0};
+        struct in_addr a = { .s_addr = wc->next_hop_ip };
+        inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
+
+        uint8_t mac[6];
+        if (arp_cache_lookup(&g_wan_arp[w], wc->next_hop_ip, mac)) {
+            fprintf(stdout,
+                    "[WAN ARP] if=%s next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    fwd->wans[w].ifname, ipbuf,
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        } else {
+            fprintf(stdout, "[WAN ARP] if=%s next_hop=%s mac=UNRESOLVED\n",
+                    fwd->wans[w].ifname, ipbuf);
+        }
+    }
 }

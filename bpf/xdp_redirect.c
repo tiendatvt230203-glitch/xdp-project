@@ -84,6 +84,43 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
+    /* Redirect only flows matching configured src/dst CIDR rules.
+     * This keeps unrelated host traffic (e.g. WAN underlay ping) in kernel path. */
+    __u32 cfg_key = 0;
+    struct redirect_cfg *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (!cfg) {
+        inc_stat(2);
+        return XDP_PASS;
+    }
+
+    int src_ok = (cfg->src_count == 0);
+    int dst_ok = (cfg->dst_count == 0);
+
+#pragma unroll
+    for (int i = 0; i < MAX_SRC_NETS; i++) {
+        if (i >= cfg->src_count)
+            break;
+        if (ip_in_net(src_ip, cfg->src_net[i], cfg->src_mask[i])) {
+            src_ok = 1;
+            break;
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < MAX_DST_NETS; i++) {
+        if (i >= cfg->dst_count)
+            break;
+        if (ip_in_net(dst_ip, cfg->dst_net[i], cfg->dst_mask[i])) {
+            dst_ok = 1;
+            break;
+        }
+    }
+
+    if (!(src_ok && dst_ok)) {
+        inc_stat(3);
+        return XDP_PASS;
+    }
+
     __u32 qid = ctx->rx_queue_index;
     int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
     if (!sock) {

@@ -1069,8 +1069,16 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
         memcpy(tx_buf, pkt_data, pkt_len);
 
         eth = (struct ether_header *)tx_buf;
-        memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
-        memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+        int have_dst = (iface->dst_mac[0] | iface->dst_mac[1] | iface->dst_mac[2] |
+                        iface->dst_mac[3] | iface->dst_mac[4] | iface->dst_mac[5]);
+        int have_src = (iface->src_mac[0] | iface->src_mac[1] | iface->src_mac[2] |
+                        iface->src_mac[3] | iface->src_mac[4] | iface->src_mac[5]);
+        /* Preserve caller-provided L2 addresses (e.g. WAN next-hop ARP rewrite).
+         * Only apply interface static MACs when they are explicitly configured. */
+        if (have_dst)
+            memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+        if (have_src)
+            memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
 
         xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
         xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;

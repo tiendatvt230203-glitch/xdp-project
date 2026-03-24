@@ -1,6 +1,7 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
+#include <linux/icmp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -30,6 +31,7 @@ struct {
 #define STAT_REDIRECT   2
 #define STAT_NO_SOCK    3
 #define STAT_ARP_PASS   4
+#define STAT_ICMP_PASS  5
 
 static __always_inline void inc_stat(int idx)
 {
@@ -58,8 +60,17 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    if (proto == __constant_htons(ETH_P_IP))
+    if (proto == __constant_htons(ETH_P_IP)) {
+        struct iphdr *ip = (void *)(eth + 1);
+        if ((void *)(ip + 1) > data_end)
+            return XDP_PASS;
+        /* Keep WAN underlay ping/icmp in kernel path. */
+        if (ip->protocol == IPPROTO_ICMP) {
+            inc_stat(STAT_ICMP_PASS);
+            return XDP_PASS;
+        }
         goto redirect;
+    }
 
     if (proto == __constant_htons(ETH_P_IPV6))
         goto redirect;
