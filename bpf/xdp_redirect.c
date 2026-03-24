@@ -7,6 +7,8 @@
 
 #define MAX_SRC_NETS 32
 #define MAX_DST_NETS 32
+#define IPPROTO_ICMP_VAL 1
+#define ETH_P_ARP_VAL 0x0806
 
 struct redirect_cfg {
     __u32 src_net[MAX_SRC_NETS];
@@ -47,7 +49,7 @@ static __always_inline void inc_stat(__u32 idx)
 }
 
 static __always_inline int parse_ipv4(void *data, void *data_end,
-                                      __u32 *src_ip, __u32 *dst_ip)
+                                      __u32 *src_ip, __u32 *dst_ip, __u8 *proto)
 {
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
@@ -62,6 +64,8 @@ static __always_inline int parse_ipv4(void *data, void *data_end,
 
     *src_ip = ip->saddr;
     *dst_ip = ip->daddr;
+    if (proto)
+        *proto = ip->protocol;
     return 0;
 }
 
@@ -77,10 +81,28 @@ int xdp_redirect_prog(struct xdp_md *ctx)
 
     void *data     = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *eth = data;
+
+    if ((void *)(eth + 1) > data_end) {
+        inc_stat(1);
+        return XDP_PASS;
+    }
+
+    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL)) {
+        inc_stat(7);
+        return XDP_PASS;
+    }
 
     __u32 src_ip, dst_ip;
-    if (parse_ipv4(data, data_end, &src_ip, &dst_ip) < 0) {
+    __u8 l4_proto = 0;
+    if (parse_ipv4(data, data_end, &src_ip, &dst_ip, &l4_proto) < 0) {
         inc_stat(1);
+        return XDP_PASS;
+    }
+
+    /* Keep ICMP in kernel path for normal reachability/debug ping. */
+    if (l4_proto == IPPROTO_ICMP_VAL) {
+        inc_stat(4);
         return XDP_PASS;
     }
 
@@ -96,21 +118,17 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     int src_ok = (cfg->src_count == 0);
     int dst_ok = (cfg->dst_count == 0);
 
-#pragma unroll
     for (int i = 0; i < MAX_SRC_NETS; i++) {
-        if (i >= cfg->src_count)
-            break;
-        if (ip_in_net(src_ip, cfg->src_net[i], cfg->src_mask[i])) {
+        if ((__u32)i < cfg->src_count &&
+            ip_in_net(src_ip, cfg->src_net[i], cfg->src_mask[i])) {
             src_ok = 1;
             break;
         }
     }
 
-#pragma unroll
     for (int i = 0; i < MAX_DST_NETS; i++) {
-        if (i >= cfg->dst_count)
-            break;
-        if (ip_in_net(dst_ip, cfg->dst_net[i], cfg->dst_mask[i])) {
+        if ((__u32)i < cfg->dst_count &&
+            ip_in_net(dst_ip, cfg->dst_net[i], cfg->dst_mask[i])) {
             dst_ok = 1;
             break;
         }

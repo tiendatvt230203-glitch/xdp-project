@@ -32,6 +32,7 @@ struct {
 #define STAT_NO_SOCK    3
 #define STAT_ARP_PASS   4
 #define STAT_ICMP_PASS  5
+#define IPPROTO_ICMP_VAL 1
 
 static __always_inline void inc_stat(int idx)
 {
@@ -65,7 +66,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         if ((void *)(ip + 1) > data_end)
             return XDP_PASS;
         /* Keep WAN underlay ping/icmp in kernel path. */
-        if (ip->protocol == IPPROTO_ICMP) {
+        if (ip->protocol == IPPROTO_ICMP_VAL) {
             inc_stat(STAT_ICMP_PASS);
             return XDP_PASS;
         }
