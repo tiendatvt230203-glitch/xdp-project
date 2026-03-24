@@ -22,8 +22,14 @@ CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     ifname VARCHAR(32) NOT NULL,
     src_ip VARCHAR(32) DEFAULT '',
     dst_ip VARCHAR(32) DEFAULT '',
+    next_hop_ip VARCHAR(32) DEFAULT '',
     window_size_kb INT DEFAULT 8192
 );
+
+/* Backward/forward compatible migration for existing deployments. */
+ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS src_ip VARCHAR(32) DEFAULT '';
+ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS dst_ip VARCHAR(32) DEFAULT '';
+ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS next_hop_ip VARCHAR(32) DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS xdp_redirect_rules (
     id SERIAL PRIMARY KEY,
