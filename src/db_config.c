@@ -614,15 +614,17 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
+        /* Prefer modern IP-based WAN schema first (src_ip/dst_ip/next_hop_ip).
+         * If unavailable, fall back to legacy MAC-based schema. */
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, src_ip, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
+            "SELECT ifname, src_ip, dst_ip, next_hop_ip, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             PQclear(res);
             res = PQexecParams(conn,
-                "SELECT ifname, src_mac, dst_mac, window_size_kb "
+                "SELECT ifname, src_ip, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
                 "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
                 1, NULL, params, NULL, NULL, 0);
         }
