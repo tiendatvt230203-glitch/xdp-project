@@ -1,6 +1,7 @@
 #ifndef FLOW_TABLE_H
 #define FLOW_TABLE_H
 
+#include "config.h"
 #include <stdint.h>
 #include <pthread.h>
 
@@ -27,11 +28,11 @@ struct flow_entry {
 struct flow_table {
     struct flow_entry *buckets[FLOW_TABLE_SIZE];
     pthread_mutex_t locks[FLOW_TABLE_SIZE];
-    uint32_t window_size;
     int wan_count;
+    uint32_t wan_window_sizes[MAX_INTERFACES]; /* bytes threshold per WAN */
 };
 
-void flow_table_init(struct flow_table *ft, uint32_t window_size, int wan_count);
+void flow_table_init(struct flow_table *ft, const uint32_t *wan_window_sizes, int wan_count);
 void flow_table_cleanup(struct flow_table *ft);
 
 int flow_table_get_wan(struct flow_table *ft,

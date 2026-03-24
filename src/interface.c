@@ -13,10 +13,6 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
-static inline int mac_is_nonzero6(const uint8_t mac[MAC_LEN]) {
-    return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
-}
-
 int interface_push_redirect_cfg(const struct redirect_cfg *rcfg)
 {
     if (config_map_fd < 0 || !rcfg)
@@ -1073,12 +1069,8 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
         memcpy(tx_buf, pkt_data, pkt_len);
 
         eth = (struct ether_header *)tx_buf;
-        /* If iface->dst_mac/src_mac are unset (all zeros), keep MAC already
-         * present in pkt_data. This is required for WAN ARP-driven MAC. */
-        if (mac_is_nonzero6(iface->dst_mac))
-            memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
-        if (mac_is_nonzero6(iface->src_mac))
-            memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
+        memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
+        memcpy(eth->ether_shost, iface->src_mac, MAC_LEN);
 
         xsk_ring_prod__tx_desc(&queue->tx, idx)->addr = addr;
         xsk_ring_prod__tx_desc(&queue->tx, idx)->len = pkt_len;

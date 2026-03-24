@@ -25,6 +25,63 @@
 #define MAX_REDIRECT_RULES 32
 #define DEFAULT_QUEUE_COUNT     1
 #define DEFAULT_LOCAL_RATE_LIMIT_MBPS 0
+#define MAX_PROFILES 32
+#define MAX_PROFILE_INTERFACES 16
+#define MAX_PROFILE_TRAFFIC_RULES 64
+#define MAX_CRYPTO_POLICIES 128
+#define POLICY_PROTO_ANY 0
+
+enum policy_action {
+    POLICY_ACTION_BYPASS = 0,
+    POLICY_ACTION_ENCRYPT_L2 = 2,
+    POLICY_ACTION_ENCRYPT_L3 = 3,
+    POLICY_ACTION_ENCRYPT_L4 = 4
+};
+
+struct profile_traffic_rule {
+    uint32_t src_net;
+    uint32_t src_mask;
+    uint32_t dst_net;
+    uint32_t dst_mask;
+};
+
+struct crypto_policy {
+    int id;
+    int priority;
+    int action;
+    uint8_t protocol;
+    int src_port_from;
+    int src_port_to;
+    int dst_port_from;
+    int dst_port_to;
+    int src_any;
+    int dst_any;
+    int src_negate;
+    int dst_negate;
+    uint32_t src_net;
+    uint32_t src_mask;
+    uint32_t dst_net;
+    uint32_t dst_mask;
+    int crypto_mode;
+    int aes_bits;
+    int nonce_size;
+    uint8_t key[AES_KEY_LEN];
+};
+
+struct profile_config {
+    int id;
+    char name[64];
+    int enabled;
+    int channel_bonding;
+    int local_indices[MAX_PROFILE_INTERFACES];
+    int local_count;
+    int wan_indices[MAX_PROFILE_INTERFACES];
+    int wan_count;
+    struct profile_traffic_rule traffic_rules[MAX_PROFILE_TRAFFIC_RULES];
+    int traffic_rule_count;
+    int policy_indices[MAX_CRYPTO_POLICIES];
+    int policy_count;
+};
 
 struct local_config {
     char ifname[IF_NAMESIZE];
@@ -83,6 +140,10 @@ struct app_config {
     int nonce_size;
     int aes_bits;
     struct redirect_cfg redirect;
+    struct profile_config profiles[MAX_PROFILES];
+    int profile_count;
+    struct crypto_policy policies[MAX_CRYPTO_POLICIES];
+    int policy_count;
 };
 struct redirect_rule {
     uint32_t src_net;
@@ -96,5 +157,14 @@ int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t
 int parse_hex_bytes_pub(const char *str, uint8_t *out, int expected_len);
 int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip);
 int config_validate(struct app_config *cfg);
+int config_select_profile_for_flow(struct app_config *cfg, uint32_t src_ip, uint32_t dst_ip);
+int config_select_wan_for_profile(struct app_config *cfg, int profile_idx,
+                                  uint32_t src_ip, uint32_t dst_ip,
+                                  uint16_t src_port, uint16_t dst_port,
+                                  uint8_t protocol);
+const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
+                                                        uint32_t src_ip, uint32_t dst_ip,
+                                                        uint16_t src_port, uint16_t dst_port,
+                                                        uint8_t protocol);
 
 #endif

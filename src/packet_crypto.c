@@ -460,11 +460,16 @@
 
 static uint16_t g_fake_ethertype_ipv4 = 0;
 static uint16_t g_fake_ethertype_ipv6 = 0;
-static uint8_t g_fake_protocol = 99;
+static __thread uint8_t g_fake_protocol = 99;
 static int g_encrypt_layer = 0;
-static int g_crypto_mode = 0;
-static int g_nonce_size = 12;
-static int g_aes_bits = 128;
+/* These are switched per encryption policy. Must be thread-local
+ * because forwarder processes different flows/policies concurrently. */
+static __thread int g_crypto_mode = 0;
+static __thread int g_nonce_size = 12;
+static __thread int g_aes_bits = 128;
+
+/* Embedded into nonce bytes so the receiver can pick the correct key/policy. */
+static __thread uint8_t g_policy_id = 0;
 
 static atomic_uint_fast32_t g_nonce_counter = 0;
 
@@ -763,7 +768,8 @@ void crypto_generate_nonce(uint32_t counter, uint8_t proto_flag,
     const int ns = g_nonce_size;
 
     /* Counter + proto flag (4 bytes, unique per packet) */
-    out_nonce[0] = (proto_flag << 7) | ((counter >> 24) & 0x7F);
+    /* Embed policy_id (lower 7 bits) while keeping proto_flag in bit7. */
+    out_nonce[0] = (proto_flag << 7) | (g_policy_id & 0x7F);
     out_nonce[1] = (counter >> 16) & 0xFF;
     out_nonce[2] = (counter >> 8) & 0xFF;
     out_nonce[3] = counter & 0xFF;
@@ -895,3 +901,6 @@ int packet_decrypt(struct packet_crypto_ctx *ctx,
 
 void packet_crypto_set_fake_protocol(uint8_t proto) { g_fake_protocol = proto; }
 uint8_t packet_crypto_get_fake_protocol(void) { return g_fake_protocol; }
+
+void packet_crypto_set_policy_id(uint8_t policy_id) { g_policy_id = policy_id; }
+uint8_t packet_crypto_get_policy_id(void) { return g_policy_id; }

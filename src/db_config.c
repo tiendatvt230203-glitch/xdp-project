@@ -6,10 +6,257 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <libpq-fe.h>
+#include <strings.h>
 
 static void db_finish(PGconn *conn, PGresult *res) {
     if (res)  PQclear(res);
     if (conn) PQfinish(conn);
+}
+
+static int str_is_any(const char *v) {
+    if (!v) return 1;
+    while (*v == ' ' || *v == '\t') v++;
+    return (v[0] == '\0' || strcasecmp(v, "any") == 0 || strcmp(v, "*") == 0);
+}
+
+static int parse_port_range(const char *v, int *from_out, int *to_out) {
+    if (str_is_any(v)) {
+        *from_out = -1;
+        *to_out = -1;
+        return 0;
+    }
+    int a = -1, b = -1;
+    if (sscanf(v, "%d-%d", &a, &b) == 2 && a >= 0 && b >= a && b <= 65535) {
+        *from_out = a;
+        *to_out = b;
+        return 0;
+    }
+    if (sscanf(v, "%d", &a) == 1 && a >= 0 && a <= 65535) {
+        *from_out = a;
+        *to_out = a;
+        return 0;
+    }
+    return -1;
+}
+
+static uint8_t parse_protocol_name(const char *v) {
+    if (str_is_any(v)) return POLICY_PROTO_ANY;
+    if (strcasecmp(v, "tcp") == 0) return 6;
+    if (strcasecmp(v, "udp") == 0) return 17;
+    if (strcasecmp(v, "icmp") == 0) return 1;
+    if (strcasecmp(v, "ospf") == 0) return 89;
+    return (uint8_t)atoi(v);
+}
+
+static int parse_action_name(const char *v) {
+    if (!v) return POLICY_ACTION_BYPASS;
+    if (strcasecmp(v, "bypass") == 0) return POLICY_ACTION_BYPASS;
+    if (strcasecmp(v, "encrypt_l2") == 0 || strcasecmp(v, "encrypt l2") == 0) return POLICY_ACTION_ENCRYPT_L2;
+    if (strcasecmp(v, "encrypt_l3") == 0 || strcasecmp(v, "encrypt l3") == 0) return POLICY_ACTION_ENCRYPT_L3;
+    if (strcasecmp(v, "encrypt_l4") == 0 || strcasecmp(v, "encrypt l4") == 0) return POLICY_ACTION_ENCRYPT_L4;
+    return atoi(v);
+}
+
+static int parse_cidr_any_or_negated(const char *v_in, int *any_out, int *neg_out,
+                                     uint32_t *net_out, uint32_t *mask_out) {
+    if (!any_out || !neg_out || !net_out || !mask_out)
+        return -1;
+
+    *any_out = 1;
+    *neg_out = 0;
+    *net_out = 0;
+    *mask_out = 0;
+
+    if (str_is_any(v_in)) {
+        *any_out = 1;
+        return 0;
+    }
+
+    /* Support negation prefix: !<cidr> */
+    while (*v_in == ' ' || *v_in == '\t') v_in++;
+    if (v_in[0] == '!') {
+        *neg_out = 1;
+        v_in++;
+        while (*v_in == ' ' || *v_in == '\t') v_in++;
+    }
+
+    uint32_t ip = 0, mask = 0, net = 0;
+    if (parse_ip_cidr_pub(v_in, &ip, &mask, &net) != 0) {
+        return -1;
+    }
+    *any_out = 0;
+    *net_out = net;
+    *mask_out = mask;
+    return 0;
+}
+
+static int find_local_index_by_ifname(const struct app_config *cfg, const char *ifname) {
+    for (int i = 0; i < cfg->local_count; i++) {
+        if (strcmp(cfg->locals[i].ifname, ifname) == 0) return i;
+    }
+    return -1;
+}
+
+static int find_wan_index_by_ifname(const struct app_config *cfg, const char *ifname) {
+    for (int i = 0; i < cfg->wan_count; i++) {
+        if (strcmp(cfg->wans[i].ifname, ifname) == 0) return i;
+    }
+    return -1;
+}
+
+static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int config_id) {
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%d", config_id);
+    const char *params[1] = { id_str };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT id, profile_name, enabled, channel_bonding "
+        "FROM xdp_profiles WHERE config_id = $1 ORDER BY id",
+        1, NULL, params, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        /* Backward-compatible path: old schema without profile tables. */
+        PQclear(res);
+        return 0;
+    }
+
+    int nprof = PQntuples(res);
+    if (nprof > MAX_PROFILES) nprof = MAX_PROFILES;
+
+    for (int i = 0; i < nprof; i++) {
+        struct profile_config *p = &cfg->profiles[cfg->profile_count];
+        memset(p, 0, sizeof(*p));
+        p->id = atoi(PQgetvalue(res, i, 0));
+        strncpy(p->name, PQgetvalue(res, i, 1), sizeof(p->name) - 1);
+        p->enabled = atoi(PQgetvalue(res, i, 2));
+        p->channel_bonding = atoi(PQgetvalue(res, i, 3));
+        cfg->profile_count++;
+    }
+    PQclear(res);
+
+    for (int pi = 0; pi < cfg->profile_count; pi++) {
+        struct profile_config *p = &cfg->profiles[pi];
+        char profile_id_str[32];
+        snprintf(profile_id_str, sizeof(profile_id_str), "%d", p->id);
+        const char *pp[1] = { profile_id_str };
+
+        res = PQexecParams(conn,
+            "SELECT ifname FROM xdp_profile_locals WHERE profile_id = $1 ORDER BY id",
+            1, NULL, pp, NULL, NULL, 0);
+        if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+            int rows = PQntuples(res);
+            for (int r = 0; r < rows && p->local_count < MAX_PROFILE_INTERFACES; r++) {
+                const char *ifname = PQgetvalue(res, r, 0);
+                int li = find_local_index_by_ifname(cfg, ifname);
+                if (li >= 0) p->local_indices[p->local_count++] = li;
+            }
+        }
+        PQclear(res);
+
+        res = PQexecParams(conn,
+            "SELECT ifname FROM xdp_profile_wans WHERE profile_id = $1 ORDER BY id",
+            1, NULL, pp, NULL, NULL, 0);
+        if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+            int rows = PQntuples(res);
+            for (int r = 0; r < rows && p->wan_count < MAX_PROFILE_INTERFACES; r++) {
+                const char *ifname = PQgetvalue(res, r, 0);
+                int wi = find_wan_index_by_ifname(cfg, ifname);
+                if (wi >= 0) p->wan_indices[p->wan_count++] = wi;
+            }
+        }
+        PQclear(res);
+
+        res = PQexecParams(conn,
+            "SELECT src_cidr, dst_cidr FROM xdp_profile_traffic_rules WHERE profile_id = $1 ORDER BY id",
+            1, NULL, pp, NULL, NULL, 0);
+        if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+            int rows = PQntuples(res);
+            for (int r = 0; r < rows && p->traffic_rule_count < MAX_PROFILE_TRAFFIC_RULES; r++) {
+                struct profile_traffic_rule *tr = &p->traffic_rules[p->traffic_rule_count];
+                uint32_t sip = 0, smask = 0, snet = 0;
+                uint32_t dip = 0, dmask = 0, dnet = 0;
+                const char *src = PQgetvalue(res, r, 0);
+                const char *dst = PQgetvalue(res, r, 1);
+                if (parse_ip_cidr_pub(src, &sip, &smask, &snet) != 0 ||
+                    parse_ip_cidr_pub(dst, &dip, &dmask, &dnet) != 0) {
+                    continue;
+                }
+                tr->src_net = snet;
+                tr->src_mask = smask;
+                tr->dst_net = dnet;
+                tr->dst_mask = dmask;
+                p->traffic_rule_count++;
+            }
+        }
+        PQclear(res);
+
+        res = PQexecParams(conn,
+            "SELECT id, priority, action, protocol, src_cidr, src_port, dst_cidr, dst_port, "
+            "       crypto_mode, aes_bits, nonce_size, crypto_key "
+            "FROM xdp_profile_crypto_policies WHERE profile_id = $1 "
+            "ORDER BY priority ASC, id ASC",
+            1, NULL, pp, NULL, NULL, 0);
+        if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+            int rows = PQntuples(res);
+            for (int r = 0; r < rows && cfg->policy_count < MAX_CRYPTO_POLICIES; r++) {
+                if (p->policy_count >= MAX_CRYPTO_POLICIES)
+                    break;
+                struct crypto_policy *cp = &cfg->policies[cfg->policy_count];
+                memset(cp, 0, sizeof(*cp));
+
+                cp->id = atoi(PQgetvalue(res, r, 0));
+                cp->priority = atoi(PQgetvalue(res, r, 1));
+                cp->action = parse_action_name(PQgetvalue(res, r, 2));
+                cp->protocol = parse_protocol_name(PQgetvalue(res, r, 3));
+
+                const char *src_cidr = PQgetvalue(res, r, 4);
+                const char *src_port = PQgetvalue(res, r, 5);
+                const char *dst_cidr = PQgetvalue(res, r, 6);
+                const char *dst_port = PQgetvalue(res, r, 7);
+                const char *mode = PQgetvalue(res, r, 8);
+                const char *bits = PQgetvalue(res, r, 9);
+                const char *nonce = PQgetvalue(res, r, 10);
+                const char *key_hex = PQgetvalue(res, r, 11);
+
+                /* If parsing fails, treat as ANY to avoid accidentally dropping traffic. */
+                if (parse_cidr_any_or_negated(src_cidr, &cp->src_any, &cp->src_negate,
+                                              &cp->src_net, &cp->src_mask) != 0) {
+                    cp->src_any = 1;
+                    cp->src_negate = 0;
+                }
+                if (parse_cidr_any_or_negated(dst_cidr, &cp->dst_any, &cp->dst_negate,
+                                              &cp->dst_net, &cp->dst_mask) != 0) {
+                    cp->dst_any = 1;
+                    cp->dst_negate = 0;
+                }
+
+                if (parse_port_range(src_port, &cp->src_port_from, &cp->src_port_to) != 0) {
+                    cp->src_port_from = -1;
+                    cp->src_port_to = -1;
+                }
+                if (parse_port_range(dst_port, &cp->dst_port_from, &cp->dst_port_to) != 0) {
+                    cp->dst_port_from = -1;
+                    cp->dst_port_to = -1;
+                }
+
+                cp->crypto_mode = (mode && (strcasecmp(mode, "gcm") == 0)) ? CRYPTO_MODE_GCM : CRYPTO_MODE_CTR;
+                cp->aes_bits = bits ? atoi(bits) : 128;
+                cp->nonce_size = nonce ? atoi(nonce) : 12;
+
+                if (key_hex && key_hex[0] != '\0') {
+                    int key_len = (cp->aes_bits == 256) ? 32 : 16;
+                    if (parse_hex_bytes_pub(key_hex, cp->key, key_len) != 0) {
+                        memset(cp->key, 0, sizeof(cp->key));
+                    }
+                }
+
+                p->policy_indices[p->policy_count++] = cfg->policy_count;
+                cfg->policy_count++;
+            }
+        }
+        PQclear(res);
+    }
+    return 0;
 }
 
 static int load_global_row(struct app_config *cfg, PGresult *res,
@@ -133,19 +380,32 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
         }
         strncpy(wan->ifname, v, IF_NAMESIZE - 1);
 
-        v = PQgetvalue(res, row, PQfnumber(res, "src_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, wan->src_mac) != 0) {
+        int src_col = PQfnumber(res, "src_mac");
+        int dst_col = PQfnumber(res, "dst_mac");
+        if (src_col >= 0) {
+            v = PQgetvalue(res, row, src_col);
+            if (v && v[0] != '\0' && parse_mac(v, wan->src_mac) != 0) {
                 fprintf(stderr, "[DB WAN] Invalid src_mac: %s\n", v);
                 return -1;
             }
         }
-
-        v = PQgetvalue(res, row, PQfnumber(res, "dst_mac"));
-        if (v && v[0] != '\0') {
-            if (parse_mac(v, wan->dst_mac) != 0) {
+        if (dst_col >= 0) {
+            v = PQgetvalue(res, row, dst_col);
+            if (v && v[0] != '\0' && parse_mac(v, wan->dst_mac) != 0) {
                 fprintf(stderr, "[DB WAN] Invalid dst_mac: %s\n", v);
                 return -1;
+            }
+        }
+
+        /* Optional per-WAN quota (bytes threshold per flow before rotating WAN). */
+        int ws_col = PQfnumber(res, "window_size_kb");
+        if (ws_col >= 0) {
+            v = PQgetvalue(res, row, ws_col);
+            if (v && v[0] != '\0') {
+                int kb = atoi(v);
+                if (kb > 0) {
+                    wan->window_size = (uint32_t)kb * 1024U;
+                }
             }
         }
 
@@ -307,9 +567,16 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, src_mac, dst_mac "
+            "SELECT ifname, src_mac, dst_mac, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
+
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            PQclear(res);
+            res = PQexecParams(conn,
+                "SELECT ifname FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
+                1, NULL, params, NULL, NULL, 0);
+        }
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             fprintf(stderr, "[DB] Query xdp_wan_configs failed: %s\n", PQerrorMessage(conn));
@@ -322,6 +589,11 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
             return -1;
         }
         PQclear(res);
+    }
+
+    if (load_profiles_and_policies(cfg, conn, config_id) != 0) {
+        PQfinish(conn);
+        return -1;
     }
 
     PQfinish(conn);

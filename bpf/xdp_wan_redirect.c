@@ -57,6 +57,9 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == __constant_htons(ETH_P_IPV6))
         goto redirect;
 
+    /* Also redirect packets that were "L2-encrypted" by userspace.
+     * For L2 encryption, ether_type is replaced with a fake ethertype where
+     * only the high 8 bits are a marker; the low 8 bits are nonce bytes. */
     int key0 = 0, key1 = 1;
     __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
     if (fake4 && *fake4 != 0 &&

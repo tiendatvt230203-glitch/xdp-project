@@ -164,6 +164,10 @@ uint16_t packet_crypto_get_fake_ethertype_ipv6(void);
 void packet_crypto_set_fake_protocol(uint8_t proto);
 uint8_t packet_crypto_get_fake_protocol(void);
 
+/* Used to embed a policy id into tunnel nonce bytes (L2/L3/L4). */
+void packet_crypto_set_policy_id(uint8_t policy_id);
+uint8_t packet_crypto_get_policy_id(void);
+
 #define AES128_GCM_TAG_SIZE  16
 
 int packet_crypto_get_tunnel_hdr_size(void);

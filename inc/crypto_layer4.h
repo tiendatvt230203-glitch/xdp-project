@@ -3,6 +3,9 @@
 
 #include "packet_crypto.h"
 
+/* Byte offset of IPv4 header (14 plain Ethernet, 18 single 802.1Q, 22 QinQ). -1 if not IPv4. */
+int crypto_eth_ipv4_offset(const uint8_t *pkt, size_t pkt_len);
+
 int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len);
 int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len);
 

@@ -138,6 +138,114 @@ int config_find_local_for_ip(struct app_config *cfg, uint32_t dest_ip) {
     return -1;
 }
 
+static int cidr_match_with_negate(int any_flag, int negate,
+                                    uint32_t ip, uint32_t net, uint32_t mask) {
+    if (any_flag)
+        return 1;
+    int in_cidr = ((ip & mask) == (net & mask));
+    return negate ? !in_cidr : in_cidr;
+}
+
+int config_select_profile_for_flow(struct app_config *cfg, uint32_t src_ip, uint32_t dst_ip) {
+    if (!cfg)
+        return -1;
+
+    for (int i = 0; i < cfg->profile_count; i++) {
+        struct profile_config *p = &cfg->profiles[i];
+        if (!p->enabled)
+            continue;
+        for (int r = 0; r < p->traffic_rule_count; r++) {
+            struct profile_traffic_rule *tr = &p->traffic_rules[r];
+            /* Forward: src in rule src CIDR, dst in rule dst CIDR */
+            int forward = (src_ip & tr->src_mask) == (tr->src_net & tr->src_mask) &&
+                          (dst_ip & tr->dst_mask) == (tr->dst_net & tr->dst_mask);
+            /* Reverse: same site-to-site pair (reply path encrypts on the far side) */
+            int reverse = (src_ip & tr->dst_mask) == (tr->dst_net & tr->dst_mask) &&
+                          (dst_ip & tr->src_mask) == (tr->src_net & tr->src_mask);
+            if (forward || reverse)
+                return i;
+        }
+    }
+    return -1;
+}
+
+static uint32_t flow_hash_u32(uint32_t src_ip, uint32_t dst_ip,
+                              uint16_t src_port, uint16_t dst_port, uint8_t protocol) {
+    uint32_t h = src_ip ^ dst_ip ^ ((uint32_t)src_port << 16) ^ dst_port ^ protocol;
+    h ^= h >> 16;
+    h *= 0x7feb352dU;
+    h ^= h >> 15;
+    h *= 0x846ca68bU;
+    h ^= h >> 16;
+    return h;
+}
+
+int config_select_wan_for_profile(struct app_config *cfg, int profile_idx,
+                                  uint32_t src_ip, uint32_t dst_ip,
+                                  uint16_t src_port, uint16_t dst_port,
+                                  uint8_t protocol) {
+    if (!cfg)
+        return -1;
+    if (profile_idx < 0 || profile_idx >= cfg->profile_count)
+        return -1;
+
+    struct profile_config *p = &cfg->profiles[profile_idx];
+    if (p->wan_count <= 0)
+        return -1;
+
+    uint32_t h = flow_hash_u32(src_ip, dst_ip, src_port, dst_port, protocol);
+    int local_wan_slot = (int)(h % (uint32_t)p->wan_count);
+    int wan_idx = p->wan_indices[local_wan_slot];
+    if (wan_idx < 0 || wan_idx >= cfg->wan_count)
+        return -1;
+    return wan_idx;
+}
+
+const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
+                                                        uint32_t src_ip, uint32_t dst_ip,
+                                                        uint16_t src_port, uint16_t dst_port,
+                                                        uint8_t protocol) {
+    if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count)
+        return NULL;
+
+    const struct profile_config *p = &cfg->profiles[profile_idx];
+    /* Prefer explicit TCP/UDP/... over POLICY_PROTO_ANY so e.g. a UDP+L3 row never
+     * steals TCP when the DB has NULL protocol (loaded as ANY) or an Any rule. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < p->policy_count; i++) {
+            int pi = p->policy_indices[i];
+            if (pi < 0 || pi >= cfg->policy_count)
+                continue;
+
+            const struct crypto_policy *cp = &cfg->policies[pi];
+            if (pass == 0) {
+                if (cp->protocol == POLICY_PROTO_ANY)
+                    continue;
+                if (cp->protocol != protocol)
+                    continue;
+            } else {
+                if (cp->protocol != POLICY_PROTO_ANY)
+                    continue;
+            }
+            if (!cidr_match_with_negate(cp->src_any, cp->src_negate, src_ip, cp->src_net, cp->src_mask))
+                continue;
+            if (!cidr_match_with_negate(cp->dst_any, cp->dst_negate, dst_ip, cp->dst_net, cp->dst_mask))
+                continue;
+
+            if (cp->src_port_from >= 0 && cp->src_port_to >= 0) {
+                if ((int)src_port < cp->src_port_from || (int)src_port > cp->src_port_to)
+                    continue;
+            }
+            if (cp->dst_port_from >= 0 && cp->dst_port_to >= 0) {
+                if ((int)dst_port < cp->dst_port_from || (int)dst_port > cp->dst_port_to)
+                    continue;
+            }
+            return cp;
+        }
+    }
+    return NULL;
+}
+
 int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network) {
     return parse_ip_cidr(str, ip, netmask, network);
 }

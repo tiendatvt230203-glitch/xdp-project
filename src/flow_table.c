@@ -24,10 +24,15 @@ static uint64_t get_time_sec(void) {
     return ts.tv_sec;
 }
 
-void flow_table_init(struct flow_table *ft, uint32_t window_size, int wan_count) {
+void flow_table_init(struct flow_table *ft, const uint32_t *wan_window_sizes, int wan_count) {
     memset(ft, 0, sizeof(*ft));
-    ft->window_size = window_size;
     ft->wan_count = wan_count;
+    for (int i = 0; i < MAX_INTERFACES; i++) {
+        if (wan_window_sizes)
+            ft->wan_window_sizes[i] = wan_window_sizes[i];
+        else
+            ft->wan_window_sizes[i] = 0;
+    }
     for (int i = 0; i < FLOW_TABLE_SIZE; i++) {
         pthread_mutex_init(&ft->locks[i], NULL);
     }
@@ -84,7 +89,12 @@ int flow_table_get_wan(struct flow_table *ft,
             entry->last_seen = now;
             entry->byte_count += pkt_len;
 
-            if (entry->byte_count >= ft->window_size) {
+            uint32_t cur_limit = 0;
+            if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
+                cur_limit = ft->wan_window_sizes[entry->current_wan];
+
+            /* If this flow reached the WAN quota, rotate to next WAN. */
+            if (cur_limit > 0 && entry->byte_count >= cur_limit) {
                 entry->byte_count = 0;
                 entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
             }
@@ -137,6 +147,15 @@ void flow_table_add_bytes(struct flow_table *ft,
             entry->key.protocol == protocol) {
 
             entry->byte_count += extra_bytes;
+
+            uint32_t cur_limit = 0;
+            if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
+                cur_limit = ft->wan_window_sizes[entry->current_wan];
+
+            if (cur_limit > 0 && entry->byte_count >= cur_limit) {
+                entry->byte_count = 0;
+                entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
+            }
             break;
         }
         entry = entry->next;

@@ -84,46 +84,6 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    __u32 key = 0;
-    struct redirect_cfg *cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (!cfg) {
-        inc_stat(2);
-        return XDP_PASS;
-    }
-
-
-    int match_src = 0;
-#pragma unroll
-    for (int i = 0; i < MAX_SRC_NETS; i++) {
-        if (i >= cfg->src_count)
-            break;
-        if (ip_in_net(src_ip, cfg->src_net[i], cfg->src_mask[i])) {
-            match_src = 1;
-            break;
-        }
-    }
-    if (!match_src) {
-        inc_stat(3);
-        return XDP_PASS;
-    }
-
-
-    int match_dst = 0;
-#pragma unroll
-    for (int j = 0; j < MAX_DST_NETS; j++) {
-        if (j >= cfg->dst_count)
-            break;
-        if (ip_in_net(dst_ip, cfg->dst_net[j], cfg->dst_mask[j])) {
-            match_dst = 1;
-            break;
-        }
-    }
-    if (!match_dst) {
-        inc_stat(4);
-        return XDP_PASS;
-    }
-
-
     __u32 qid = ctx->rx_queue_index;
     int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
     if (!sock) {
