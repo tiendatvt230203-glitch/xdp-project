@@ -21,15 +21,14 @@ CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL,
     dst_ip VARCHAR(32) DEFAULT '',
-    next_hop_ip VARCHAR(32) DEFAULT '',
     window_size_kb INT DEFAULT 8192
 );
 
 /* Backward/forward compatible migration for existing deployments. */
 ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS dst_ip VARCHAR(32) DEFAULT '';
-ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS next_hop_ip VARCHAR(32) DEFAULT '';
-/* Local WAN IP comes from kernel iface; drop legacy src_ip if present. */
+/* Local WAN IP comes from kernel iface; drop legacy / obsolete columns. */
 ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS src_ip;
+ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS next_hop_ip;
 
 CREATE TABLE IF NOT EXISTS xdp_redirect_rules (
     id SERIAL PRIMARY KEY,

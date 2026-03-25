@@ -102,7 +102,6 @@ struct wan_config {
     uint32_t dst_ip;      /* peer WAN IPv4 (network byte order); local IP from kernel iface */
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
-    uint32_t next_hop_ip; /* IPv4 next-hop for WAN L2 rewrite (network byte order) */
     uint32_t window_size;
     uint32_t umem_mb;
     uint32_t ring_size;

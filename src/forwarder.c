@@ -362,14 +362,15 @@ static int set_wan_l2_addrs(struct forwarder *fwd, int wan_idx, uint8_t *pkt) {
     struct xsk_interface *wan = &fwd->wans[wan_idx];
     const struct wan_config *wan_cfg = &fwd->cfg->wans[wan_idx];
 
-    if (wan_cfg->next_hop_ip != 0) {
+    /* L2 dest MAC = Ethernet address of far-end peer (Sep), resolved by ARP on dst_ip. */
+    if (wan_cfg->dst_ip != 0) {
         uint8_t dst_mac[6];
-        if (arp_cache_lookup(&g_wan_arp[wan_idx], wan_cfg->next_hop_ip, dst_mac)) {
+        if (arp_cache_lookup(&g_wan_arp[wan_idx], wan_cfg->dst_ip, dst_mac)) {
             memcpy(pkt, dst_mac, 6);
             memcpy(pkt + 6, g_wan_arp[wan_idx].if_mac, 6);
             return 0;
         }
-        arp_send_request(&g_wan_arp[wan_idx], wan_cfg->next_hop_ip);
+        arp_send_request(&g_wan_arp[wan_idx], wan_cfg->dst_ip);
         return -1;
     }
 
@@ -379,37 +380,35 @@ static int set_wan_l2_addrs(struct forwarder *fwd, int wan_idx, uint8_t *pkt) {
     return 0;
 }
 
-static void log_wan_next_hop_mac(struct forwarder *fwd, int wan_idx) {
+static void log_wan_peer_mac(struct forwarder *fwd, int wan_idx) {
     if (!fwd || wan_idx < 0 || wan_idx >= fwd->wan_count)
         return;
     const struct wan_config *wc = &fwd->cfg->wans[wan_idx];
-    if (wc->next_hop_ip == 0)
+    if (wc->dst_ip == 0)
         return;
 
     char ipbuf[INET_ADDRSTRLEN] = {0};
-    struct in_addr a = { .s_addr = wc->next_hop_ip };
+    struct in_addr a = { .s_addr = wc->dst_ip };
     inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
 
     uint8_t mac[6];
     for (int tries = 0; tries < 10; tries++) {
-        if (arp_cache_lookup(&g_wan_arp[wan_idx], wc->next_hop_ip, mac)) {
+        if (arp_cache_lookup(&g_wan_arp[wan_idx], wc->dst_ip, mac)) {
             fprintf(stderr,
-                    "[WAN ARP] if=%s local_ip=%u dst_ip=%u next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x (Sep device)\n",
                     fwd->wans[wan_idx].ifname,
                     (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
-                    (unsigned)ntohl(wc->dst_ip),
                     ipbuf,
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             return;
         }
-        arp_send_request(&g_wan_arp[wan_idx], wc->next_hop_ip);
+        arp_send_request(&g_wan_arp[wan_idx], wc->dst_ip);
         usleep(100000);
     }
     fprintf(stderr,
-            "[WAN ARP] if=%s local_ip=%u dst_ip=%u next_hop=%s mac=UNRESOLVED\n",
+            "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=UNRESOLVED (Sep / dst_ip not on L2 segment?)\n",
             fwd->wans[wan_idx].ifname,
             (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
-            (unsigned)ntohl(wc->dst_ip),
             ipbuf);
 }
 
@@ -1979,18 +1978,18 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             goto err_wans;
         }
         fwd->wan_count++;
-        if (cfg->wans[i].next_hop_ip != 0) {
+        if (cfg->wans[i].dst_ip != 0) {
             /* Ensure TX path does not override ARP-resolved MAC with legacy static MAC fields. */
             memset(fwd->wans[i].dst_mac, 0, MAC_LEN);
             memset(fwd->wans[i].src_mac, 0, MAC_LEN);
         }
     }
 
-    /* Optional WAN next-hop ARP (per WAN interface). */
+    /* WAN L2 dest MAC via ARP on peer (dst_ip / Sep); requires same L2 segment as this iface. */
     for (int i = 0; i < fwd->wan_count; i++) {
-        if (cfg->wans[i].next_hop_ip == 0) {
+        if (cfg->wans[i].dst_ip == 0) {
             fprintf(stderr,
-                    "[WAN ARP] if=%s next_hop_ip=0 -> using static/fallback MAC path\n",
+                    "[WAN ARP] if=%s dst_ip=0 -> using static/fallback MAC path\n",
                     cfg->wans[i].ifname);
             continue;
         }
@@ -1999,7 +1998,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             pthread_create(&tid, NULL, arp_listener_thread, &g_wan_arp[i]);
             pthread_detach(tid);
             g_arp_inited = 1;
-            log_wan_next_hop_mac(fwd, i);
+            log_wan_peer_mac(fwd, i);
         } else {
             fprintf(stderr, "[ARP] WARN: cannot init WAN ARP on %s\n", cfg->wans[i].ifname);
         }
@@ -2416,24 +2415,24 @@ void forwarder_print_stats(struct forwarder *fwd) {
 
     for (int w = 0; w < fwd->wan_count; w++) {
         const struct wan_config *wc = &fwd->cfg->wans[w];
-        if (wc->next_hop_ip == 0) {
-            fprintf(stdout, "[WAN ARP] if=%s next_hop=disabled (static/fallback path)\n",
+        if (wc->dst_ip == 0) {
+            fprintf(stdout, "[WAN ARP] if=%s peer ARP=disabled (static/fallback path)\n",
                     fwd->wans[w].ifname);
             continue;
         }
 
         char ipbuf[INET_ADDRSTRLEN] = {0};
-        struct in_addr a = { .s_addr = wc->next_hop_ip };
+        struct in_addr a = { .s_addr = wc->dst_ip };
         inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
 
         uint8_t mac[6];
-        if (arp_cache_lookup(&g_wan_arp[w], wc->next_hop_ip, mac)) {
+        if (arp_cache_lookup(&g_wan_arp[w], wc->dst_ip, mac)) {
             fprintf(stdout,
-                    "[WAN ARP] if=%s next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    "[WAN ARP] if=%s peer=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
                     fwd->wans[w].ifname, ipbuf,
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         } else {
-            fprintf(stdout, "[WAN ARP] if=%s next_hop=%s mac=UNRESOLVED\n",
+            fprintf(stdout, "[WAN ARP] if=%s peer=%s dest_mac=UNRESOLVED\n",
                     fwd->wans[w].ifname, ipbuf);
         }
     }

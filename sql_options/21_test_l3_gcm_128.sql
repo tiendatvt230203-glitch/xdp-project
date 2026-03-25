@@ -25,12 +25,11 @@ INSERT INTO xdp_wan_configs (
     config_id,
     ifname,
     dst_ip,
-    next_hop_ip,
     window_size_kb
 ) VALUES
-(21, 'enp4s0', '192.168.11.2/24',  '192.168.11.2',  100),
-(21, 'enp5s0', '192.168.131.2/24', '192.168.131.2', 100),
-(21, 'enp6s0', '192.168.203.2/24', '192.168.203.2', 100);
+(21, 'enp4s0', '192.168.11.2/24',  100),
+(21, 'enp5s0', '192.168.131.2/24', 100),
+(21, 'enp6s0', '192.168.203.2/24', 100);
 
 INSERT INTO xdp_redirect_rules (
     config_id,

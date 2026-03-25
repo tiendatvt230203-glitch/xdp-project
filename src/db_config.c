@@ -403,8 +403,6 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
                 fprintf(stderr, "[DB WAN] Invalid dst_ip: %s\n", v);
                 return -1;
             }
-            if (wan->dst_ip != 0)
-                wan->next_hop_ip = wan->dst_ip;
         }
 
         /* Backward-compatible MAC columns (legacy schema). */
@@ -421,18 +419,6 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
             v = PQgetvalue(res, row, dst_mac_col);
             if (v && v[0] != '\0' && parse_mac(v, wan->dst_mac) != 0) {
                 fprintf(stderr, "[DB WAN] Invalid dst_mac: %s\n", v);
-                return -1;
-            }
-        }
-
-        /* Optional per-WAN next-hop IPv4 for ARP-based L2 rewrite. */
-        int nh_col = PQfnumber(res, "next_hop_ip");
-        if (nh_col < 0) nh_col = PQfnumber(res, "gateway_ip");
-        if (nh_col < 0) nh_col = PQfnumber(res, "peer_ip");
-        if (nh_col >= 0) {
-            v = PQgetvalue(res, row, nh_col);
-            if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->next_hop_ip) != 0) {
-                fprintf(stderr, "[DB WAN] Invalid next_hop_ip/gateway_ip/peer_ip: %s\n", v);
                 return -1;
             }
         }
@@ -606,17 +592,16 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
-        /* Prefer modern IP-based WAN schema (dst_ip + next_hop_ip; local IP from iface).
-         * If unavailable, fall back to legacy MAC-based schema. */
+        /* WAN: dst_ip = peer (Sep); dest Ethernet MAC = ARP(dst_ip). Local IP from kernel iface. */
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, dst_ip, next_hop_ip, window_size_kb "
+            "SELECT ifname, dst_ip, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             PQclear(res);
             res = PQexecParams(conn,
-                "SELECT ifname, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
+                "SELECT ifname, dst_ip, src_mac, dst_mac, window_size_kb "
                 "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
                 1, NULL, params, NULL, NULL, 0);
         }
