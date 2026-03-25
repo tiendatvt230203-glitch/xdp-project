@@ -394,9 +394,9 @@ static void log_wan_next_hop_mac(struct forwarder *fwd, int wan_idx) {
     for (int tries = 0; tries < 10; tries++) {
         if (arp_cache_lookup(&g_wan_arp[wan_idx], wc->next_hop_ip, mac)) {
             fprintf(stderr,
-                    "[WAN ARP] if=%s src_ip=%u dst_ip=%u next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    "[WAN ARP] if=%s local_ip=%u dst_ip=%u next_hop=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
                     fwd->wans[wan_idx].ifname,
-                    (unsigned)ntohl(wc->src_ip),
+                    (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
                     (unsigned)ntohl(wc->dst_ip),
                     ipbuf,
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -406,9 +406,9 @@ static void log_wan_next_hop_mac(struct forwarder *fwd, int wan_idx) {
         usleep(100000);
     }
     fprintf(stderr,
-            "[WAN ARP] if=%s src_ip=%u dst_ip=%u next_hop=%s mac=UNRESOLVED\n",
+            "[WAN ARP] if=%s local_ip=%u dst_ip=%u next_hop=%s mac=UNRESOLVED\n",
             fwd->wans[wan_idx].ifname,
-            (unsigned)ntohl(wc->src_ip),
+            (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
             (unsigned)ntohl(wc->dst_ip),
             ipbuf);
 }

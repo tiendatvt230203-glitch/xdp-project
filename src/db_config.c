@@ -396,15 +396,7 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
         }
         strncpy(wan->ifname, v, IF_NAMESIZE - 1);
 
-        int src_ip_col = PQfnumber(res, "src_ip");
         int dst_ip_col = PQfnumber(res, "dst_ip");
-        if (src_ip_col >= 0) {
-            v = PQgetvalue(res, row, src_ip_col);
-            if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->src_ip) != 0) {
-                fprintf(stderr, "[DB WAN] Invalid src_ip: %s\n", v);
-                return -1;
-            }
-        }
         if (dst_ip_col >= 0) {
             v = PQgetvalue(res, row, dst_ip_col);
             if (v && v[0] != '\0' && parse_ipv4_addr(v, &wan->dst_ip) != 0) {
@@ -614,17 +606,17 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
-        /* Prefer modern IP-based WAN schema first (src_ip/dst_ip/next_hop_ip).
+        /* Prefer modern IP-based WAN schema (dst_ip + next_hop_ip; local IP from iface).
          * If unavailable, fall back to legacy MAC-based schema. */
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, src_ip, dst_ip, next_hop_ip, window_size_kb "
+            "SELECT ifname, dst_ip, next_hop_ip, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             PQclear(res);
             res = PQexecParams(conn,
-                "SELECT ifname, src_ip, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
+                "SELECT ifname, dst_ip, src_mac, dst_mac, next_hop_ip, window_size_kb "
                 "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
                 1, NULL, params, NULL, NULL, 0);
         }

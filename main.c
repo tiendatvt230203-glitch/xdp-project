@@ -191,9 +191,8 @@ static void log_wan_l2_resolution_plan(struct app_config *cfg) {
     for (int i = 0; i < cfg->wan_count; i++) {
         struct wan_config *w = &cfg->wans[i];
         fprintf(stderr,
-                "[WAN CFG] if=%s src_ip=%u dst_ip=%u next_hop_ip=%u static_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                "[WAN CFG] if=%s dst_ip=%u next_hop_ip=%u static_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
                 w->ifname,
-                (unsigned)ntohl(w->src_ip),
                 (unsigned)ntohl(w->dst_ip),
                 (unsigned)ntohl(w->next_hop_ip),
                 w->dst_mac[0], w->dst_mac[1], w->dst_mac[2],

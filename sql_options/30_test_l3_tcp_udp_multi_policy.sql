@@ -31,14 +31,13 @@ INSERT INTO xdp_local_configs (
 INSERT INTO xdp_wan_configs (
     config_id,
     ifname,
-    src_ip,
     dst_ip,
     next_hop_ip,
     window_size_kb
 ) VALUES
-(30, 'enp4s0', '192.168.11.1/24',  '192.168.11.2/24',  '192.168.11.2',  100),
-(30, 'enp5s0', '192.168.131.1/24', '192.168.131.2/24', '192.168.131.2', 100),
-(30, 'enp6s0', '192.168.203.1/24', '192.168.203.2/24', '192.168.203.2', 100);
+(30, 'enp4s0', '192.168.11.2/24',  '192.168.11.2',  100),
+(30, 'enp5s0', '192.168.131.2/24', '192.168.131.2', 100),
+(30, 'enp6s0', '192.168.203.2/24', '192.168.203.2', 100);
 
 -- Profile traffic rules (chỉ cần khớp src/dst để chọn đúng profile)
 INSERT INTO xdp_profiles (
