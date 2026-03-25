@@ -248,3 +248,61 @@ int arp_init_for_local(struct arp_cache *c,
     return 0;
 }
 
+int wan_rewrite_dest_mac(struct arp_cache *wan_cache,
+                          const struct wan_config *wan_cfg,
+                          const struct xsk_interface *wan_iface,
+                          uint8_t *pkt) {
+    if (!wan_cache || !wan_cfg || !wan_iface || !pkt)
+        return -1;
+
+    /* L2 dest MAC = Ethernet address of far-end peer (Sep), resolved by ARP on dst_ip. */
+    if (wan_cfg->dst_ip != 0) {
+        uint8_t dst_mac[6];
+        if (arp_cache_lookup(wan_cache, wan_cfg->dst_ip, dst_mac)) {
+            memcpy(pkt, dst_mac, 6);
+            memcpy(pkt + 6, wan_cache->if_mac, 6);
+            return 0;
+        }
+        arp_send_request(wan_cache, wan_cfg->dst_ip);
+        return -1;
+    }
+
+    /* Backward-compatible fallback: static WAN MACs. */
+    memcpy(pkt, wan_iface->dst_mac, 6);
+    memcpy(pkt + 6, wan_iface->src_mac, 6);
+    return 0;
+}
+
+void wan_log_peer_mac(struct arp_cache *wan_cache,
+                       const char *ifname,
+                       const struct wan_config *wan_cfg) {
+    if (!wan_cache || !ifname || !wan_cfg)
+        return;
+    if (wan_cfg->dst_ip == 0)
+        return;
+
+    char ipbuf[INET_ADDRSTRLEN] = {0};
+    struct in_addr a = { .s_addr = wan_cfg->dst_ip };
+    inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
+
+    uint8_t mac[6];
+    for (int tries = 0; tries < 10; tries++) {
+        if (arp_cache_lookup(wan_cache, wan_cfg->dst_ip, mac)) {
+            fprintf(stderr,
+                    "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x (Sep device)\n",
+                    ifname,
+                    (unsigned)ntohl(wan_cache->if_ip),
+                    ipbuf,
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            return;
+        }
+        arp_send_request(wan_cache, wan_cfg->dst_ip);
+        usleep(100000);
+    }
+    fprintf(stderr,
+            "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=UNRESOLVED (Sep / dst_ip not on L2 segment?)\n",
+            ifname,
+            (unsigned)ntohl(wan_cache->if_ip),
+            ipbuf);
+}
+

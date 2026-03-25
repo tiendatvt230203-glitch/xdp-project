@@ -38,5 +38,16 @@ int arp_init_for_local(struct arp_cache *c,
 
 void *arp_listener_thread(void *arg);
 
+/* WAN L2 dest MAC rewrite based on ARP over dst_ip (peer/Sep device). */
+int wan_rewrite_dest_mac(struct arp_cache *wan_cache,
+                          const struct wan_config *wan_cfg,
+                          const struct xsk_interface *wan_iface,
+                          uint8_t *pkt);
+
+/* Print resolved peer dest MAC for WAN config. */
+void wan_log_peer_mac(struct arp_cache *wan_cache,
+                       const char *ifname,
+                       const struct wan_config *wan_cfg);
+
 #endif /* WAN_ARP_H */
 

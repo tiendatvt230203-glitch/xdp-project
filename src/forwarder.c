@@ -7,6 +7,8 @@
 #include "../inc/crypto_layer3.h"
 #include "../inc/crypto_layer4.h"
 #include "../inc/wan_arp.h"
+#include "../inc/crypto_policy_utils.h"
+#include "../inc/crypto_dispatch.h"
 #include <signal.h>
 #include <poll.h>
 #include <pthread.h>
@@ -61,59 +63,27 @@ static int select_wan_idx_for_packet(struct forwarder *fwd,
 }
 
 static const struct crypto_policy *select_crypto_policy_for_packet(struct forwarder *fwd,
-                                                                       uint32_t src_ip, uint32_t dst_ip,
-                                                                       uint16_t src_port, uint16_t dst_port,
-                                                                       uint8_t protocol) {
+                                                                     uint32_t src_ip, uint32_t dst_ip,
+                                                                     uint16_t src_port, uint16_t dst_port,
+                                                                     uint8_t protocol) {
     if (!fwd || !fwd->cfg)
         return NULL;
-    if (fwd->cfg->profile_count <= 0)
-        return NULL;
-
-    int profile_idx = config_select_profile_for_flow(fwd->cfg, src_ip, dst_ip);
-    if (profile_idx < 0)
-        return NULL;
-
-    return config_select_crypto_policy(fwd->cfg, profile_idx,
-                                       src_ip, dst_ip,
-                                       src_port, dst_port,
-                                       protocol);
+    return crypto_select_policy_for_flow(fwd->cfg,
+                                          src_ip, dst_ip,
+                                          src_port, dst_port,
+                                          protocol);
 }
 
 static void apply_default_crypto_params(struct forwarder *fwd) {
     if (!fwd || !fwd->cfg)
         return;
-    packet_crypto_set_mode(fwd->cfg->crypto_mode);
-    packet_crypto_set_aes_bits(fwd->cfg->aes_bits);
-    packet_crypto_set_nonce_size(fwd->cfg->nonce_size);
-    packet_crypto_set_fake_protocol((uint8_t)(fwd->cfg->fake_protocol & 0xFF));
-    packet_crypto_set_policy_id(0);
+    crypto_apply_default_from_cfg(fwd->cfg);
 }
 
 static void apply_crypto_params_from_policy(const struct crypto_policy *cp) {
-    if (!cp) return;
-    packet_crypto_set_mode(cp->crypto_mode);
-    packet_crypto_set_aes_bits(cp->aes_bits);
-    packet_crypto_set_nonce_size(cp->nonce_size);
-
-    /* IMPORTANT:
-     * packet_encrypt()/packet_decrypt() choose implementation by the global
-     * (thread-local) encrypt_layer. When the DB uses mixed policies
-     * (e.g. encrypt_l3 + encrypt_l4) within the same forwarder config,
-     * cfg->encrypt_layer may not equal cp->action. So we must override it
-     * per-policy here, otherwise L4 packets might be decrypted with L3 code.
-     */
-    if (cp->action == POLICY_ACTION_ENCRYPT_L2)
-        packet_crypto_set_encrypt_layer(2);
-    else if (cp->action == POLICY_ACTION_ENCRYPT_L3)
-        packet_crypto_set_encrypt_layer(3);
-    else if (cp->action == POLICY_ACTION_ENCRYPT_L4)
-        packet_crypto_set_encrypt_layer(4);
-
-    if (cp->action == POLICY_ACTION_ENCRYPT_L3)
-        packet_crypto_set_fake_protocol(99);
-    else
-        packet_crypto_set_fake_protocol((uint8_t)(cp->id & 0xFF));
-    packet_crypto_set_policy_id((uint8_t)(cp->id & 0x7F));
+    if (!cp)
+        return;
+    crypto_apply_from_policy(cp);
 }
 
 static int encrypt_packet_with_ctx(struct packet_crypto_ctx *ctx,
@@ -131,60 +101,18 @@ static struct arp_cache g_wan_arp[MAX_INTERFACES];
 static int g_arp_inited = 0;
 
 static int set_wan_l2_addrs(struct forwarder *fwd, int wan_idx, uint8_t *pkt) {
-    if (!fwd || !pkt || wan_idx < 0 || wan_idx >= fwd->wan_count)
+    if (!fwd || wan_idx < 0 || wan_idx >= fwd->wan_count)
         return -1;
-
-    struct xsk_interface *wan = &fwd->wans[wan_idx];
-    const struct wan_config *wan_cfg = &fwd->cfg->wans[wan_idx];
-
-    /* L2 dest MAC = Ethernet address of far-end peer (Sep), resolved by ARP on dst_ip. */
-    if (wan_cfg->dst_ip != 0) {
-        uint8_t dst_mac[6];
-        if (arp_cache_lookup(&g_wan_arp[wan_idx], wan_cfg->dst_ip, dst_mac)) {
-            memcpy(pkt, dst_mac, 6);
-            memcpy(pkt + 6, g_wan_arp[wan_idx].if_mac, 6);
-            return 0;
-        }
-        arp_send_request(&g_wan_arp[wan_idx], wan_cfg->dst_ip);
-        return -1;
-    }
-
-    /* Backward-compatible fallback: static WAN MACs. */
-    memcpy(pkt, wan->dst_mac, 6);
-    memcpy(pkt + 6, wan->src_mac, 6);
-    return 0;
+    return wan_rewrite_dest_mac(&g_wan_arp[wan_idx],
+                                 &fwd->cfg->wans[wan_idx],
+                                 &fwd->wans[wan_idx],
+                                 pkt);
 }
 
 static void log_wan_peer_mac(struct forwarder *fwd, int wan_idx) {
     if (!fwd || wan_idx < 0 || wan_idx >= fwd->wan_count)
         return;
-    const struct wan_config *wc = &fwd->cfg->wans[wan_idx];
-    if (wc->dst_ip == 0)
-        return;
-
-    char ipbuf[INET_ADDRSTRLEN] = {0};
-    struct in_addr a = { .s_addr = wc->dst_ip };
-    inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
-
-    uint8_t mac[6];
-    for (int tries = 0; tries < 10; tries++) {
-        if (arp_cache_lookup(&g_wan_arp[wan_idx], wc->dst_ip, mac)) {
-            fprintf(stderr,
-                    "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x (Sep device)\n",
-                    fwd->wans[wan_idx].ifname,
-                    (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
-                    ipbuf,
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-            return;
-        }
-        arp_send_request(&g_wan_arp[wan_idx], wc->dst_ip);
-        usleep(100000);
-    }
-    fprintf(stderr,
-            "[WAN ARP] if=%s local_ip=%u peer_ip=%s dest_mac=UNRESOLVED (Sep / dst_ip not on L2 segment?)\n",
-            fwd->wans[wan_idx].ifname,
-            (unsigned)ntohl(g_wan_arp[wan_idx].if_ip),
-            ipbuf);
+    wan_log_peer_mac(&g_wan_arp[wan_idx], fwd->wans[wan_idx].ifname, &fwd->cfg->wans[wan_idx]);
 }
 
 struct packet_job {
@@ -321,68 +249,8 @@ static int l4_extract_policy_id_ipv4(uint8_t *pkt, uint32_t pkt_len,
     if (!pkt || !policy_id_out || !nonce_size_out)
         return -1;
 
-    int l3_off = crypto_eth_ipv4_offset(pkt, pkt_len);
-    if (l3_off < 0)
-        return -1;
-    if (pkt_len < (uint32_t)(l3_off + 20))
-        return -1;
-
-    uint8_t ip_hdr_len = (pkt[l3_off] & 0x0F) * 4;
-    if (ip_hdr_len < 20)
-        return -1;
-    if (pkt_len < (uint32_t)(l3_off + ip_hdr_len + 8))
-        return -1;
-
-    uint8_t ip_proto = pkt[l3_off + 9];
-    int transport_off = l3_off + ip_hdr_len;
-    const uint8_t L4_TUNNEL_MAGIC = 0xA5;
-    int candidates[4] = {4, 8, 12, 16};
-
-    if (ip_proto == 6) {
-        if (pkt_len < (uint32_t)(transport_off + 20))
-            return -1;
-        uint8_t tcp_hdr_len = ((pkt[transport_off + 12] >> 4) & 0x0F) * 4;
-        if (tcp_hdr_len < 20)
-            return -1;
-        int legacy_tun = transport_off + tcp_hdr_len;
-
-        for (int i = 0; i < 4; i++) {
-            int ns = candidates[i];
-            /* Full-segment L4 TCP: tunnel immediately after IP (SYN/ACK included). */
-            if (transport_off + ns + 1 < (int)pkt_len &&
-                pkt[transport_off + ns + 1] == L4_TUNNEL_MAGIC) {
-                *nonce_size_out = ns;
-                *policy_id_out = (uint8_t)(pkt[transport_off + ns] & 0x7F);
-                return 0;
-            }
-            /* Legacy: tunnel after TCP header. */
-            if (legacy_tun + ns + 1 < (int)pkt_len &&
-                pkt[legacy_tun + ns + 1] == L4_TUNNEL_MAGIC) {
-                *nonce_size_out = ns;
-                *policy_id_out = (uint8_t)(pkt[legacy_tun + ns] & 0x7F);
-                return 0;
-            }
-        }
-        return -1;
-    }
-
-    if (ip_proto == 17) {
-        int tunnel_off = transport_off + 8;
-        if (tunnel_off >= (int)pkt_len)
-            return -1;
-        for (int i = 0; i < 4; i++) {
-            int ns = candidates[i];
-            if (tunnel_off + ns + 1 >= (int)pkt_len)
-                continue;
-            if (pkt[tunnel_off + ns + 1] == L4_TUNNEL_MAGIC) {
-                *nonce_size_out = ns;
-                *policy_id_out = (uint8_t)(pkt[tunnel_off + ns] & 0x7F);
-                return 0;
-            }
-        }
-    }
-
-    return -1;
+    /* Moved to module for easier debugging. */
+    return crypto_l4_extract_policy_id_ipv4(pkt, pkt_len, policy_id_out, nonce_size_out);
 }
 
 static int l3_extract_policy_id(uint8_t *pkt, uint32_t pkt_len,
@@ -390,38 +258,8 @@ static int l3_extract_policy_id(uint8_t *pkt, uint32_t pkt_len,
     if (!pkt || !policy_id_out || pkt_len < 14 + 20)
         return -1;
 
-    uint16_t ether_type = ((uint16_t)pkt[12] << 8) | pkt[13];
-    int l3_off;
-    int ip_hdr_len;
-    uint8_t proto;
-    uint8_t marker = 99;
-    int nonce_size = packet_crypto_get_nonce_size();
-
-    if (ether_type == 0x0800) {
-        l3_off = 14;
-        ip_hdr_len = (pkt[l3_off] & 0x0F) * 4;
-        if (ip_hdr_len < 20 || pkt_len < (uint32_t)(l3_off + ip_hdr_len + 1))
-            return -1;
-        proto = pkt[l3_off + 9];
-    } else if (ether_type == 0x86DD) {
-        l3_off = 14;
-        ip_hdr_len = 40;
-        if (pkt_len < (uint32_t)(l3_off + ip_hdr_len + 1))
-            return -1;
-        proto = pkt[l3_off + 6];
-    } else {
-        return -1;
-    }
-
-    if (proto != marker)
-        return -1;
-
-    int tunnel_off = l3_off + ip_hdr_len;
-    if (tunnel_off + nonce_size >= (int)pkt_len)
-        return -1;
-
-    *policy_id_out = (uint8_t)(pkt[tunnel_off + nonce_size] & 0x7F);
-    return 0;
+    /* Moved to module for easier debugging. */
+    return crypto_l3_extract_policy_id(pkt, pkt_len, policy_id_out);
 }
 
 static int decrypt_packet_auto_by_action(struct forwarder *fwd,
@@ -431,142 +269,14 @@ static int decrypt_packet_auto_by_action(struct forwarder *fwd,
     if (!crypto_enabled || !fwd || !fwd->cfg || !pkt || !pkt_len)
         return -1;
 
-    if (fwd->cfg->policy_count <= 0) {
-        apply_default_crypto_params(fwd);
-        int new_len = packet_decrypt(&crypto_ctx, pkt, *pkt_len);
-        if (new_len < 0) return -1;
-        *pkt_len = (uint32_t)new_len;
-        return 0;
-    }
-
-    if (action_layer == POLICY_ACTION_ENCRYPT_L3) {
-        uint8_t policy_id = 0;
-        if (l3_extract_policy_id(pkt, *pkt_len, &policy_id) != 0)
-            return 0;
-
-        for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-            if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L3)
-                continue;
-            if (!g_policy_crypto_ctx_ready[pi])
-                continue;
-            if ((uint8_t)(cp->id & 0x7F) != policy_id)
-                continue;
-
-            apply_crypto_params_from_policy(cp);
-            int new_len = packet_decrypt(&g_policy_crypto_ctx[pi], pkt, *pkt_len);
-            if (new_len < 0)
-                return -1;
-            *pkt_len = (uint32_t)new_len;
-            return 0;
-        }
-        return -1;
-    }
-
-    if (action_layer == POLICY_ACTION_ENCRYPT_L4) {
-        int l3_off = crypto_eth_ipv4_offset(pkt, *pkt_len);
-        if (l3_off < 0)
-            return 0;
-
-        uint8_t ip_hdr_len = (pkt[l3_off] & 0x0F) * 4;
-        if (ip_hdr_len < 20)
-            return 0;
-
-        if (*pkt_len < (uint32_t)(l3_off + ip_hdr_len + 8))
-            return 0;
-
-        uint8_t ip_proto = pkt[l3_off + 9];
-        if (ip_proto != 6 && ip_proto != 17)
-            return 0;
-
-        int transport_off = l3_off + ip_hdr_len;
-        const uint8_t L4_TUNNEL_MAGIC = 0xA5;
-
-        int tcp_hdr_len = 0;
-        if (ip_proto == 6) {
-            if (*pkt_len < (uint32_t)(transport_off + 20))
-                return 0;
-            tcp_hdr_len = ((pkt[transport_off + 12] >> 4) & 0x0F) * 4;
-            if (tcp_hdr_len < 20)
-                return 0;
-        }
-
-        /* Strict match: only decrypt when magic + policy_id match same L4 policy.
-         * This avoids false-positive "magic" hits on plain TCP bytes. */
-        for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-            if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4)
-                continue;
-            if (!g_policy_crypto_ctx_ready[pi] || cp->nonce_size <= 0)
-                continue;
-
-            int ns = cp->nonce_size;
-            int tunnel_off = -1;
-
-            if (ip_proto == 6) {
-                int off_new = transport_off;
-                if (off_new + ns + 1 < (int)*pkt_len &&
-                    pkt[off_new + ns + 1] == L4_TUNNEL_MAGIC &&
-                    ((uint8_t)(pkt[off_new + ns] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
-                    ((pkt[off_new] & 0x80) == 0)) {
-                    tunnel_off = off_new;
-                } else {
-                    int off_legacy = transport_off + tcp_hdr_len;
-                    if (off_legacy + ns + 1 < (int)*pkt_len &&
-                        pkt[off_legacy + ns + 1] == L4_TUNNEL_MAGIC &&
-                        ((uint8_t)(pkt[off_legacy + ns] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
-                        ((pkt[off_legacy] & 0x80) == 0)) {
-                        tunnel_off = off_legacy;
-                    }
-                }
-            } else {
-                int off_udp = transport_off + 8;
-                if (off_udp + ns + 1 < (int)*pkt_len &&
-                    pkt[off_udp + ns + 1] == L4_TUNNEL_MAGIC &&
-                    ((uint8_t)(pkt[off_udp + ns] & 0x7F) == (uint8_t)(cp->id & 0x7F)) &&
-                    ((pkt[off_udp] & 0x80) == 0)) {
-                    tunnel_off = off_udp;
-                }
-            }
-
-            if (tunnel_off < 0)
-                continue;
-
-            apply_crypto_params_from_policy(cp);
-            int new_len = packet_decrypt(&g_policy_crypto_ctx[pi], pkt, *pkt_len);
-            if (new_len < 0)
-                return -1;
-            *pkt_len = (uint32_t)new_len;
-            return 0;
-        }
-
-        /* Not an L4-encrypted packet for any configured policy => pass through. */
-        return 0;
-    }
-
-    /* Fallback brute-force for non-implemented cases (mainly L4). */
-    for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-        const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-        if (!cp || cp->action != action_layer)
-            continue;
-        if (!g_policy_crypto_ctx_ready[pi])
-            continue;
-
-        if (*pkt_len > scratch_sz)
-            return -1;
-
-        memcpy(scratch, pkt, *pkt_len);
-        apply_crypto_params_from_policy(cp);
-        int new_len = packet_decrypt(&g_policy_crypto_ctx[pi], pkt, *pkt_len);
-        if (new_len < 0) {
-            memcpy(pkt, scratch, *pkt_len);
-            continue;
-        }
-        *pkt_len = (uint32_t)new_len;
-        return 0;
-    }
-
-    return -1;
+    struct crypto_dispatch_ctx dctx = {
+        .base_ctx = &crypto_ctx,
+        .per_policy_ctx = g_policy_crypto_ctx,
+        .per_policy_ready = g_policy_crypto_ctx_ready
+    };
+    return crypto_decrypt_packet_auto_by_action(crypto_enabled, fwd->cfg, &dctx,
+                                                action_layer, pkt, pkt_len,
+                                                scratch, scratch_sz);
 }
 
 static int frag_decrypt_fragment_auto_l3(struct forwarder *fwd,
