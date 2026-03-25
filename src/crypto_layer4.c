@@ -152,7 +152,19 @@ int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     packet[l3_off + 10] = (uint8_t)(cksum >> 8);
     packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-    return (int)(pkt_len + (size_t)total_overhead);
+    /* TCP checksum must be recomputed when we mutate TCP/UDP payload. */
+    size_t new_pkt_len = pkt_len + (size_t)total_overhead;
+    if (ip_proto == 6) {
+        uint8_t *tcp_seg = packet + transport_off;
+        int tcp_seg_len = (int)(new_pkt_len - (size_t)transport_off);
+        tcp_seg[TCP_CKSUM_OFF] = 0;
+        tcp_seg[TCP_CKSUM_OFF + 1] = 0;
+        uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off, ip_hdr_len, tcp_seg, tcp_seg_len);
+        tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
+        tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+    }
+
+    return (int)new_pkt_len;
 }
 
 int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len) {
@@ -255,7 +267,19 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
         packet[l3_off + 10] = (uint8_t)(cksum >> 8);
         packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-        return (int)(pkt_len - (size_t)total_overhead);
+        /* TCP checksum must be recomputed after decrypt/strip. */
+        size_t new_pkt_len = pkt_len - (size_t)total_overhead;
+        if (ip_proto == 6) {
+            uint8_t *tcp_seg = packet + transport_off;
+            int tcp_seg_len = (int)(new_pkt_len - (size_t)transport_off);
+            tcp_seg[TCP_CKSUM_OFF] = 0;
+            tcp_seg[TCP_CKSUM_OFF + 1] = 0;
+            uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off, ip_hdr_len, tcp_seg, tcp_seg_len);
+            tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
+            tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+        }
+
+        return (int)new_pkt_len;
     }
     return -1;
 }
