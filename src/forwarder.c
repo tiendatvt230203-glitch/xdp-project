@@ -92,6 +92,21 @@ static void apply_crypto_params_from_policy(const struct crypto_policy *cp) {
     packet_crypto_set_mode(cp->crypto_mode);
     packet_crypto_set_aes_bits(cp->aes_bits);
     packet_crypto_set_nonce_size(cp->nonce_size);
+
+    /* IMPORTANT:
+     * packet_encrypt()/packet_decrypt() choose implementation by the global
+     * (thread-local) encrypt_layer. When the DB uses mixed policies
+     * (e.g. encrypt_l3 + encrypt_l4) within the same forwarder config,
+     * cfg->encrypt_layer may not equal cp->action. So we must override it
+     * per-policy here, otherwise L4 packets might be decrypted with L3 code.
+     */
+    if (cp->action == POLICY_ACTION_ENCRYPT_L2)
+        packet_crypto_set_encrypt_layer(2);
+    else if (cp->action == POLICY_ACTION_ENCRYPT_L3)
+        packet_crypto_set_encrypt_layer(3);
+    else if (cp->action == POLICY_ACTION_ENCRYPT_L4)
+        packet_crypto_set_encrypt_layer(4);
+
     if (cp->action == POLICY_ACTION_ENCRYPT_L3)
         packet_crypto_set_fake_protocol(99);
     else
