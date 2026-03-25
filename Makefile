@@ -8,7 +8,7 @@ KERNEL_HEADERS = /usr/include
 
 BIN_DIR = bin
 
-SRC = main.c src/config.c src/db_config.c src/interface.c src/forwarder.c src/packet_crypto.c src/crypto_layer2.c src/crypto_layer3.c src/crypto_layer4.c src/flow_table.c src/fragment.c
+SRC = main.c src/config.c src/db_config.c src/interface.c src/forwarder.c src/wan_arp.c src/packet_crypto.c src/crypto_layer2.c src/crypto_layer3.c src/crypto_layer4.c src/flow_table.c src/fragment.c
 OBJ = $(SRC:.c=.o)
 TARGET = $(BIN_DIR)/network-encryptor
 
