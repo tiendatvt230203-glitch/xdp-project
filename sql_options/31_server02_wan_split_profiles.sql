@@ -74,12 +74,12 @@ INSERT INTO xdp_redirect_rules (config_id, src_cidr, dst_cidr) VALUES
 
 -- Profile traffic rules (host-specific; profile match should also accept reverse direction)
 INSERT INTO xdp_profile_traffic_rules (profile_id, src_cidr, dst_cidr)
-SELECT p.id, '192.168.182.2/32', '192.168.9.2/32'
+SELECT p.id, '192.168.182.0/24', '192.168.9.0/24'
 FROM xdp_profiles p
 WHERE p.config_id = 31 AND p.profile_name = 'profile_182_to_9';
 
 INSERT INTO xdp_profile_traffic_rules (profile_id, src_cidr, dst_cidr)
-SELECT p.id, '192.168.180.2/32', '192.168.10.2/32'
+SELECT p.id, '192.168.180.0/24', '192.168.10.0/24'
 FROM xdp_profiles p
 WHERE p.config_id = 31 AND p.profile_name = 'profile_180_to_10';
 
