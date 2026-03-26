@@ -1422,27 +1422,8 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    
-    for (int i = 0; i < cfg->local_count; i++) {
-        if (cfg->locals[i].queue_count <= 1) {
-            int want = 4;
-            interface_set_queue_count(cfg->locals[i].ifname, want);
-            int hwq = interface_get_queue_count(cfg->locals[i].ifname);
-            if (hwq > 1)
-                cfg->locals[i].queue_count = hwq;
-        }
-    }
-
-    
-    if (!crypto_enabled) {
-        for (int i = 0; i < cfg->wan_count; i++) {
-            if (cfg->wans[i].queue_count <= 1) {
-                int hwq = interface_get_queue_count(cfg->wans[i].ifname);
-                if (hwq > 1)
-                    cfg->wans[i].queue_count = hwq;
-            }
-        }
-    }
+    /* Do not auto-expand queue_count to NIC max: interface.c binds min(cfg, HW).
+     * Keeping cfg->locals[].queue_count / wans[].queue_count as set above (e.g. 1 for debug). */
 
     uint32_t wan_window_sizes[MAX_INTERFACES] = {0};
     for (int i = 0; i < cfg->wan_count && i < MAX_INTERFACES; i++)

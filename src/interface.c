@@ -53,6 +53,18 @@ int interface_get_queue_count(const char *ifname) {
     return get_rx_queue_count(ifname);
 }
 
+/* Use min(cfg, HW): forwarder may force queue_count=1 for debugging; never ignore cfg. */
+static int effective_xsk_queue_count(const char *ifname, int cfg_q) {
+    int hw = get_rx_queue_count(ifname);
+    if (hw < 1)
+        hw = 1;
+    if (cfg_q <= 0)
+        return hw > MAX_QUEUES ? MAX_QUEUES : hw;
+    if (cfg_q > MAX_QUEUES)
+        cfg_q = MAX_QUEUES;
+    return cfg_q < hw ? cfg_q : hw;
+}
+
 int interface_set_queue_count(const char *ifname, int desired_count) {
     struct ethtool_channels channels = {0};
     struct ifreq ifr = {0};
@@ -144,7 +156,7 @@ int interface_init_local(struct xsk_interface *iface,
         return -1;
     }
 
-    int queue_count = get_rx_queue_count(local_cfg->ifname);
+    int queue_count = effective_xsk_queue_count(local_cfg->ifname, local_cfg->queue_count);
 
     if (!bpf_obj) {
         bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
@@ -237,7 +249,8 @@ int interface_init_local(struct xsk_interface *iface,
         ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
                                  &queue->rx, &queue->tx, &sock_cfg);
         if (ret) {
-            fprintf(stderr, "Queue %d: xsk_socket__create failed: %d\n", q, ret);
+            fprintf(stderr, "Queue %d: xsk_socket__create failed: %d (%s)\n", q, ret,
+                    ret < 0 ? strerror(-ret) : "non-negative error");
             xsk_umem__delete(queue->umem);
             munlock(queue->bufs, local_umem_size);
             free(queue->bufs);
@@ -389,7 +402,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         return -1;
     }
 
-    int queue_count = get_rx_queue_count(wan_cfg->ifname);
+    int queue_count = effective_xsk_queue_count(wan_cfg->ifname, wan_cfg->queue_count);
 
     bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
 
@@ -482,7 +495,8 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         ret = xsk_socket__create(&queue->xsk, iface->ifname, q, queue->umem,
                                  &queue->rx, &queue->tx, &sock_cfg);
         if (ret) {
-            fprintf(stderr, "WAN Queue %d: xsk_socket__create failed: %d\n", q, ret);
+            fprintf(stderr, "WAN Queue %d: xsk_socket__create failed: %d (%s)\n", q, ret,
+                    ret < 0 ? strerror(-ret) : "non-negative error");
             xsk_umem__delete(queue->umem);
             munlock(queue->bufs, wan_umem_size);
             free(queue->bufs);
