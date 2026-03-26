@@ -139,7 +139,11 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    __u32 qid = ctx->rx_queue_index;
+    /* Debug/compat: userspace forwarder typically only creates AF_XDP sockets
+     * for queue 0 (cfg->queue_count=1). RSS may send flows to other RX queues,
+     * which would make xsks_map lookup fail and leave packets in kernel path.
+     * Always redirect to queue 0 to make matching deterministic. */
+    __u32 qid = 0;
     int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
     if (!sock) {
         inc_stat(5);

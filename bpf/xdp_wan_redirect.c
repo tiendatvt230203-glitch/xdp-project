@@ -95,7 +95,8 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
 redirect:
     ;
-    int queue_id = ctx->rx_queue_index;
+    /* Keep deterministic mapping with userspace sockets created for queue 0 only. */
+    int queue_id = 0;
     int ret = bpf_redirect_map(&wan_xsks_map, queue_id, XDP_PASS);
 
     if (ret == XDP_REDIRECT) {
