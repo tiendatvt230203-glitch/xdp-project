@@ -9,9 +9,29 @@
 #include <linux/sockios.h>
 #include <linux/if.h>
 
-static struct bpf_object *bpf_obj = NULL;
-static int xsk_map_fd = -1;
-static int config_map_fd = -1;
+/* NOTE:
+ * With multiple local interfaces, sharing one global bpf_obj/xsks_map causes
+ * queue key collisions (qid=0 from iface A overwritten by iface B).
+ * Keep one BPF object/map instance per local iface init, and fan-out redirect
+ * config updates to all discovered local config_map fds.
+ */
+static int config_map_fds[MAX_INTERFACES];
+static int config_map_fd_count = 0;
+
+void interface_reset_redirect_maps(void) {
+    config_map_fd_count = 0;
+}
+
+static void register_config_map_fd(int fd) {
+    if (fd < 0)
+        return;
+    for (int i = 0; i < config_map_fd_count; i++) {
+        if (config_map_fds[i] == fd)
+            return;
+    }
+    if (config_map_fd_count < MAX_INTERFACES)
+        config_map_fds[config_map_fd_count++] = fd;
+}
 
 /* bpf_set_link_xdp_fd(-1) must use the same attachment class (SKB vs DRV/HW) or the program stays loaded. */
 static void interface_xdp_try_detach(int ifindex, const char *ifname) {
@@ -33,10 +53,15 @@ static void interface_xdp_try_detach(int ifindex, const char *ifname) {
 
 int interface_push_redirect_cfg(const struct redirect_cfg *rcfg)
 {
-    if (config_map_fd < 0 || !rcfg)
+    if (!rcfg || config_map_fd_count <= 0)
         return -1;
     __u32 key = 0;
-    return bpf_map_update_elem(config_map_fd, &key, rcfg, 0);
+    int ok = 0;
+    for (int i = 0; i < config_map_fd_count; i++) {
+        if (bpf_map_update_elem(config_map_fds[i], &key, rcfg, 0) == 0)
+            ok = 1;
+    }
+    return ok ? 0 : -1;
 }
 
 static int get_rx_queue_count(const char *ifname) {
@@ -159,9 +184,10 @@ int interface_init_local(struct xsk_interface *iface,
                          const struct local_config *local_cfg,
                          const char *bpf_file) {
     int ret;
+    struct bpf_object *bpf_obj = NULL;
     struct bpf_program *prog;
     struct bpf_map *map;
-    int prog_fd;
+    int prog_fd, xsk_map_fd = -1;
 
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(local_cfg->ifname);
@@ -178,49 +204,47 @@ int interface_init_local(struct xsk_interface *iface,
 
     interface_xdp_try_detach(iface->ifindex, iface->ifname);
 
-    if (!bpf_obj) {
-        if (access(bpf_file, F_OK) != 0) {
-            fprintf(stderr, "XDP object not found: %s\n", bpf_file);
-            return -1;
-        }
-
-        bpf_obj = bpf_object__open_file(bpf_file, NULL);
-        if (libbpf_get_error(bpf_obj)) {
-            fprintf(stderr, "Failed to open %s\n", bpf_file);
-            bpf_obj = NULL;
-            return -1;
-        }
-
-        ret = bpf_object__load(bpf_obj);
-        if (ret) {
-            fprintf(stderr, "Failed to load BPF object\n");
-            bpf_object__close(bpf_obj);
-            bpf_obj = NULL;
-            return -1;
-        }
-
-        prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
-        if (!prog) {
-            fprintf(stderr, "XDP program not found\n");
-            bpf_object__close(bpf_obj);
-            bpf_obj = NULL;
-            return -1;
-        }
-        prog_fd = bpf_program__fd(prog);
-
-        map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
-        if (!map) {
-            fprintf(stderr, "xsks_map not found\n");
-            bpf_object__close(bpf_obj);
-            bpf_obj = NULL;
-            return -1;
-        }
-        xsk_map_fd = bpf_map__fd(map);
-
-        map = bpf_object__find_map_by_name(bpf_obj, "config_map");
-        if (map)
-            config_map_fd = bpf_map__fd(map);
+    if (access(bpf_file, F_OK) != 0) {
+        fprintf(stderr, "XDP object not found: %s\n", bpf_file);
+        return -1;
     }
+
+    bpf_obj = bpf_object__open_file(bpf_file, NULL);
+    if (libbpf_get_error(bpf_obj)) {
+        fprintf(stderr, "Failed to open %s\n", bpf_file);
+        bpf_obj = NULL;
+        return -1;
+    }
+
+    ret = bpf_object__load(bpf_obj);
+    if (ret) {
+        fprintf(stderr, "Failed to load BPF object\n");
+        bpf_object__close(bpf_obj);
+        bpf_obj = NULL;
+        return -1;
+    }
+
+    prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
+    if (!prog) {
+        fprintf(stderr, "XDP program not found\n");
+        bpf_object__close(bpf_obj);
+        bpf_obj = NULL;
+        return -1;
+    }
+    prog_fd = bpf_program__fd(prog);
+
+    map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
+    if (!map) {
+        fprintf(stderr, "xsks_map not found\n");
+        bpf_object__close(bpf_obj);
+        bpf_obj = NULL;
+        return -1;
+    }
+    xsk_map_fd = bpf_map__fd(map);
+
+    map = bpf_object__find_map_by_name(bpf_obj, "config_map");
+    if (map)
+        register_config_map_fd(bpf_map__fd(map));
 
     size_t local_umem_size = (size_t)local_cfg->umem_mb * 1024 * 1024;
     iface->umem_size = local_umem_size;
@@ -328,10 +352,8 @@ err_queues:
         }
     }
     interface_xdp_try_detach(iface->ifindex, iface->ifname);
-    if (bpf_obj) {
+    if (bpf_obj)
         bpf_object__close(bpf_obj);
-        bpf_obj = NULL;
-    }
     return -1;
 }
 

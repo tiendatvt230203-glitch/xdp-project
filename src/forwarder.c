@@ -38,8 +38,6 @@ static volatile int running = 1;
 static struct packet_crypto_ctx crypto_ctx;
 static int crypto_enabled = 0;
 static int crypto_layer = 0;
-static int g_debug_flow = 0;
-static uint64_t g_debug_flow_seq = 0;
 
 static struct flow_table g_flow_table;
 
@@ -49,37 +47,6 @@ static int g_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
 
 /* Used to keep thread-local crypto params in sync for legacy paths. */
 static struct app_config *g_cfg_ptr = NULL;
-
-static int is_debug_pair(uint32_t src_ip_be, uint32_t dst_ip_be) {
-    uint32_t s = ntohl(src_ip_be);
-    uint32_t d = ntohl(dst_ip_be);
-    int pair_9_182 = ((s == 0xC0A80902U && d == 0xC0A8B602U) || (s == 0xC0A8B602U && d == 0xC0A80902U));
-    int pair_10_180 = ((s == 0xC0A80A02U && d == 0xC0A8B402U) || (s == 0xC0A8B402U && d == 0xC0A80A02U));
-    return pair_9_182 || pair_10_180;
-}
-
-static void flowdbg(const char *stage,
-                    uint32_t src_ip, uint32_t dst_ip,
-                    uint16_t src_port, uint16_t dst_port,
-                    uint8_t protocol,
-                    int profile_idx, int wan_idx,
-                    const struct crypto_policy *cp,
-                    int rc) {
-    if (!g_debug_flow || !is_debug_pair(src_ip, dst_ip))
-        return;
-    char sip[INET_ADDRSTRLEN] = {0}, dip[INET_ADDRSTRLEN] = {0};
-    struct in_addr sa = { .s_addr = src_ip };
-    struct in_addr da = { .s_addr = dst_ip };
-    inet_ntop(AF_INET, &sa, sip, sizeof(sip));
-    inet_ntop(AF_INET, &da, dip, sizeof(dip));
-    uint64_t seq = __sync_add_and_fetch(&g_debug_flow_seq, 1);
-    fprintf(stderr,
-            "[FLOWDBG %lu] %s src=%s:%u dst=%s:%u proto=%u profile=%d wan=%d policy=%d action=%d rc=%d\n",
-            (unsigned long)seq, stage,
-            sip, (unsigned)src_port, dip, (unsigned)dst_port, (unsigned)protocol,
-            profile_idx, wan_idx,
-            cp ? cp->id : -1, cp ? cp->action : -1, rc);
-}
 
 static int select_wan_idx_for_packet(struct forwarder *fwd,
                                      uint32_t src_ip, uint32_t dst_ip,
@@ -1167,14 +1134,10 @@ static void *worker_thread(void *arg) {
                                   &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0);
 
         int wan_idx;
-        int profile_idx = -1;
         if (flow_ok) {
-            profile_idx = config_select_profile_for_flow(fwd->cfg, src_ip, dst_ip);
             wan_idx = select_wan_idx_for_packet(fwd,
                                                 src_ip, dst_ip, src_port, dst_port,
                                                 protocol, job.pkt_len);
-            flowdbg("wan_select", src_ip, dst_ip, src_port, dst_port, protocol,
-                    profile_idx, wan_idx, NULL, 0);
         } else {
             wan_idx = 0;
         }
@@ -1200,8 +1163,6 @@ static void *worker_thread(void *arg) {
                                                      src_ip, dst_ip,
                                                      src_port, dst_port,
                                                      protocol);
-                flowdbg("policy_select", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, cp ? 0 : -1);
                 if (cp) {
                     if (cp->action == POLICY_ACTION_BYPASS) {
                         bypass_crypto = 1;
@@ -1224,20 +1185,14 @@ static void *worker_thread(void *arg) {
             if (bypass_crypto) {
                 uint8_t *pkt = (uint8_t *)job.pkt_ptr;
                 if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                    flowdbg("drop_set_wan_l2_bypass", src_ip, dst_ip, src_port, dst_port, protocol,
-                            profile_idx, wan_idx, cp, -1);
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                     goto release_local;
                 }
 
                 if (interface_send_batch_queue(wan, tq, job.pkt_ptr, pkt_len) == 0) {
-                    flowdbg("tx_wan_bypass_ok", src_ip, dst_ip, src_port, dst_port, protocol,
-                            profile_idx, wan_idx, cp, 0);
                     __sync_fetch_and_add(&fwd->local_to_wan, 1);
                     wan_used[wan_idx] = 1;
                 } else {
-                    flowdbg("drop_tx_wan_bypass_fail", src_ip, dst_ip, src_port, dst_port, protocol,
-                            profile_idx, wan_idx, cp, -1);
                     __sync_fetch_and_add(&fwd->total_dropped, 1);
                 }
                 goto skip_encrypt_flush;
@@ -1247,20 +1202,14 @@ static void *worker_thread(void *arg) {
         if (!crypto_enabled) {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                flowdbg("drop_set_wan_l2_no_crypto", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, -1);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 goto release_local;
             }
 
             if (interface_send_batch_queue(wan, tq, pkt, pkt_len) == 0) {
-                flowdbg("tx_wan_no_crypto_ok", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, 0);
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                flowdbg("drop_tx_wan_no_crypto_fail", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, -1);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
             }
         } else if (crypto_layer == 3 && 0) {
@@ -1352,8 +1301,6 @@ static void *worker_thread(void *arg) {
         } else {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                flowdbg("drop_set_wan_l2_crypto", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, -1);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 goto release_local;
             }
@@ -1370,21 +1317,15 @@ static void *worker_thread(void *arg) {
             }
 
             if (new_len < 0) {
-                flowdbg("drop_encrypt_fail", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, -1);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 goto release_local;
             }
             pkt_len = (uint32_t)new_len;
 
             if (interface_send_batch_queue(wan, tq, job.pkt_ptr, pkt_len) == 0) {
-                flowdbg("tx_wan_crypto_ok", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, 0);
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                flowdbg("drop_tx_wan_crypto_fail", src_ip, dst_ip, src_port, dst_port, protocol,
-                        profile_idx, wan_idx, cp, -1);
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
             }
         }
@@ -1410,9 +1351,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     memset(fwd, 0, sizeof(*fwd));
     fwd->cfg = cfg;
     g_cfg_ptr = cfg;
-    g_debug_flow = (getenv("NE_DEBUG_FLOW") && atoi(getenv("NE_DEBUG_FLOW")) != 0) ? 1 : 0;
-    if (g_debug_flow)
-        fprintf(stderr, "[FLOWDBG] enabled for pairs 9<->182 and 10<->180\n");
+    interface_reset_redirect_maps();
 
     /* Debug simplify: single queue per interface.
      * This removes a lot of thread/queue interleaving noise while you study
