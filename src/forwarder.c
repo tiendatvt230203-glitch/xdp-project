@@ -53,10 +53,34 @@ static int select_wan_idx_for_packet(struct forwarder *fwd,
                                      uint16_t src_port, uint16_t dst_port,
                                      uint8_t protocol, uint32_t pkt_len) {
     /* Keep crypto policy selection independent from WAN selection.
-     * WAN selection is handled by flow_table to preserve packet order:
-     * packets of a single flow stay on one WAN until the per-WAN byte quota
-     * is reached, then rotate to the next WAN. */
+     * WAN selection should be profile-aware:
+     * - If the matched profile has multiple WANs, rotate only within that WAN pool.
+     * - Otherwise, keep the legacy behavior (rotate across all WANs via flow_table). */
     (void)pkt_len;
+
+    if (fwd && fwd->cfg && fwd->cfg->profile_count > 0) {
+        int profile_idx = config_select_profile_for_flow(fwd->cfg, src_ip, dst_ip);
+        if (profile_idx >= 0 && profile_idx < fwd->cfg->profile_count) {
+            struct profile_config *p = &fwd->cfg->profiles[profile_idx];
+            if (p->wan_count > 1) {
+                int allowed[MAX_INTERFACES];
+                int allowed_count = 0;
+                for (int i = 0; i < p->wan_count && i < MAX_INTERFACES; i++) {
+                    int wi = p->wan_indices[i];
+                    if (wi >= 0 && wi < fwd->cfg->wan_count)
+                        allowed[allowed_count++] = wi;
+                }
+                if (allowed_count > 1) {
+                    return flow_table_get_wan_profile(&g_flow_table,
+                                                       src_ip, dst_ip,
+                                                       src_port, dst_port,
+                                                       protocol, pkt_len,
+                                                       allowed, allowed_count);
+                }
+            }
+        }
+    }
+
     return flow_table_get_wan(&g_flow_table,
                                src_ip, dst_ip, src_port, dst_port,
                                protocol, pkt_len);
