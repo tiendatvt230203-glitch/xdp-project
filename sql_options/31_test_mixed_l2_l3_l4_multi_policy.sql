@@ -22,13 +22,14 @@ INSERT INTO xdp_configs (
 ) VALUES
 (31, 1, '2b7e151628aed2a6abf7158809cf4f3c', 3, 99, 'ctr', 128, 16);
 
+-- Hai NIC local: mỗi card một prefix LAN (đổi mapping nếu dây/subnet thực tế khác).
 INSERT INTO xdp_local_configs (
     config_id,
     ifname,
     network
 ) VALUES
 (31, 'enp7s0', '192.168.9.0/24'),
-(31, 'enp7s0', '192.168.10.0/24');
+(31, 'eno2', '192.168.10.0/24');
 
 INSERT INTO xdp_wan_configs (
     config_id,
@@ -50,10 +51,15 @@ INSERT INTO xdp_profiles (
 (31, 'profile_9_to_182',  1, 1, '192.168.9.2 <-> 192.168.182.2 via WAN1+WAN2'),
 (31, 'profile_10_to_180', 1, 1, '192.168.10.2 <-> 192.168.180.2 via WAN2+WAN3');
 
--- Both profiles use the same local interface.
+-- profile_9_to_182 dùng enp7s0; profile_10_to_180 dùng eno2.
 INSERT INTO xdp_profile_locals (profile_id, ifname)
-SELECT p.id, 'enp7s0'
+SELECT p.id, w.ifname
 FROM xdp_profiles p
+JOIN (VALUES
+    ('profile_9_to_182',  'enp7s0'),
+    ('profile_10_to_180', 'eno2')
+) AS w(profile_name, ifname)
+ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 
 -- Profile-specific WAN pools:

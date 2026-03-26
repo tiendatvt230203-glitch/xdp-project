@@ -27,10 +27,10 @@ INSERT INTO xdp_configs (
 ) VALUES
 (31, 1, '2b7e151628aed2a6abf7158809cf4f3c', 3, 99, 'ctr', 128, 16);
 
--- Local site networks on enp7s0 (Server02 side)
+-- Hai NIC local: 182.x trên enp7s0, 180.x trên eno2 (đổi nếu máy bạn gán port khác).
 INSERT INTO xdp_local_configs (config_id, ifname, network) VALUES
 (31, 'enp7s0', '192.168.182.0/24'),
-(31, 'enp7s0', '192.168.180.0/24');
+(31, 'eno2', '192.168.180.0/24');
 
 -- WAN peer (Sep device) IPs on the other end of each L2 WAN link
 INSERT INTO xdp_wan_configs (config_id, ifname, dst_ip, window_size_kb) VALUES
@@ -43,10 +43,15 @@ INSERT INTO xdp_profiles (config_id, profile_name, enabled, channel_bonding, des
 (31, 'profile_182_to_9',  1, 1, '192.168.182.2 <-> 192.168.9.2 via WAN1+WAN2'),
 (31, 'profile_180_to_10', 1, 1, '192.168.180.2 <-> 192.168.10.2 via WAN2+WAN3');
 
--- Both profiles use the same local interface
+-- profile_182_to_9 bind enp7s0; profile_180_to_10 bind eno2.
 INSERT INTO xdp_profile_locals (profile_id, ifname)
-SELECT p.id, 'enp7s0'
+SELECT p.id, w.ifname
 FROM xdp_profiles p
+JOIN (VALUES
+    ('profile_182_to_9',  'enp7s0'),
+    ('profile_180_to_10', 'eno2')
+) AS w(profile_name, ifname)
+ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 
 -- Profile-specific WAN pools

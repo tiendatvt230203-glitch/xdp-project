@@ -13,6 +13,24 @@ static struct bpf_object *bpf_obj = NULL;
 static int xsk_map_fd = -1;
 static int config_map_fd = -1;
 
+/* bpf_set_link_xdp_fd(-1) must use the same attachment class (SKB vs DRV/HW) or the program stays loaded. */
+static void interface_xdp_try_detach(int ifindex, const char *ifname) {
+    static const int modes[] = {
+        XDP_FLAGS_SKB_MODE,
+        XDP_FLAGS_DRV_MODE,
+        XDP_FLAGS_HW_MODE,
+    };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        int r = bpf_set_link_xdp_fd(ifindex, -1, modes[i]);
+        if (r < 0) {
+            int e = -r;
+            if (e != EINVAL && e != EOPNOTSUPP && e != ENODEV && e != ENOENT && ifname)
+                fprintf(stderr, "[XDP] %s: detach flags=0x%x ret=%d (%s)\n",
+                        ifname, (unsigned)modes[i], r, strerror(e));
+        }
+    }
+}
+
 int interface_push_redirect_cfg(const struct redirect_cfg *rcfg)
 {
     if (config_map_fd < 0 || !rcfg)
@@ -158,9 +176,9 @@ int interface_init_local(struct xsk_interface *iface,
 
     int queue_count = effective_xsk_queue_count(local_cfg->ifname, local_cfg->queue_count);
 
-    if (!bpf_obj) {
-        bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+    interface_xdp_try_detach(iface->ifindex, iface->ifname);
 
+    if (!bpf_obj) {
         if (access(bpf_file, F_OK) != 0) {
             fprintf(stderr, "XDP object not found: %s\n", bpf_file);
             return -1;
@@ -289,7 +307,8 @@ int interface_init_local(struct xsk_interface *iface,
     prog_fd = bpf_program__fd(prog);
     ret = bpf_set_link_xdp_fd(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
     if (ret) {
-        fprintf(stderr, "bpf_set_link_xdp_fd failed: %d\n", ret);
+        fprintf(stderr, "bpf_set_link_xdp_fd failed: %d (%s)\n", ret,
+                ret < 0 ? strerror(-ret) : "non-negative");
         goto err_queues;
     }
 
@@ -308,7 +327,7 @@ err_queues:
             free(queue->bufs);
         }
     }
-    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+    interface_xdp_try_detach(iface->ifindex, iface->ifname);
     if (bpf_obj) {
         bpf_object__close(bpf_obj);
         bpf_obj = NULL;
@@ -404,7 +423,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
 
     int queue_count = effective_xsk_queue_count(wan_cfg->ifname, wan_cfg->queue_count);
 
-    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+    interface_xdp_try_detach(iface->ifindex, iface->ifname);
 
     if (access(bpf_file, F_OK) != 0) {
         fprintf(stderr, "WAN XDP object not found: %s\n", bpf_file);
@@ -557,7 +576,7 @@ err_queues:
             free(queue->bufs);
         }
     }
-    bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+    interface_xdp_try_detach(iface->ifindex, iface->ifname);
     if (wan_bpf_obj) bpf_object__close(wan_bpf_obj);
     return -1;
 }
@@ -566,7 +585,7 @@ void interface_cleanup(struct xsk_interface *iface) {
     pthread_mutex_destroy(&iface->tx_lock);
 
     if (iface->ifindex)
-        bpf_set_link_xdp_fd(iface->ifindex, -1, XDP_FLAGS_SKB_MODE);
+        interface_xdp_try_detach(iface->ifindex, iface->ifname);
 
     for (int q = 0; q < iface->queue_count; q++) {
         struct xsk_queue *queue = &iface->queues[q];

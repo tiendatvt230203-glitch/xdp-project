@@ -24,6 +24,12 @@
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1U << 1)
 #endif
+#ifndef XDP_FLAGS_DRV_MODE
+#define XDP_FLAGS_DRV_MODE (1U << 2)
+#endif
+#ifndef XDP_FLAGS_HW_MODE
+#define XDP_FLAGS_HW_MODE (1U << 3)
+#endif
 
 #ifndef XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD
 #define XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD (1U << 0)

@@ -1444,6 +1444,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     for (int i = 0; i < cfg->local_count; i++) {
         if (interface_init_local(&fwd->locals[i], &cfg->locals[i], cfg->bpf_file) != 0) {
             fprintf(stderr, "Failed to init LOCAL %s\n", cfg->locals[i].ifname);
+            interface_cleanup(&fwd->locals[i]);
             goto err_locals;
         }
         fwd->local_count++;

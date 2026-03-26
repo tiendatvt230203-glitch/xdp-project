@@ -322,6 +322,13 @@ int main(int argc, char **argv) {
                         forwarder_run(&fwd);
                         forwarder_cleanup(&fwd);
                         g_active_config_id = -1;
+                    } else {
+                        fprintf(stderr,
+                                "[FATAL] forwarder_init failed for config_id=%d — "
+                                "often AF_XDP EBUSY: another XDP/AF_XDP on the local NIC, "
+                                "or stale driver-mode XDP; try: ip link set dev <iface> xdp off, "
+                                "bpftool net list, ensure single network-encryptor instance.\n",
+                                id);
                     }
                 }
             }
