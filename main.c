@@ -10,6 +10,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <libgen.h>
+#include <limits.h>
 
 #include "config.h"
 #include "db_config.h"
@@ -18,6 +22,19 @@
 #define NOTIFY_CHANNEL "xdp_start"
 
 static int g_active_config_id = -1;
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+            "Usage:\n"
+            "  %s               # daemon mode (LISTEN %s)\n"
+            "  %s -id <ID>       # load option ID into DB + notify daemon\n"
+            "\n"
+            "Env (DB defaults like xdp_load_option.sh if missing):\n"
+            "  DB_HOST=localhost DB_PORT=5432 DB_NAME=xdpdb DB_USER=sep\n"
+            "Required: DB_PASS (or provide /opt/db.env)\n"
+            "Optional: SQL_DIR (default: sql_options)\n",
+            prog, NOTIFY_CHANNEL, prog);
+}
 
 static const char *policy_action_name(int action) {
     switch (action) {
@@ -252,29 +269,341 @@ static int libbpf_print_silent(enum libbpf_print_level level,
     (void)args;
     return 0;
 }
+
+static void setenv_default(const char *k, const char *v) {
+    if (!k || !v) return;
+    const char *cur = getenv(k);
+    if (!cur || !*cur) setenv(k, v, 0);
+}
+
+static int parse_int_strict(const char *s, int *out) {
+    if (!s || !*s) return -1;
+    /* Match script: digits only (any integer), keep it simple */
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+    }
+    long v = strtol(s, NULL, 10);
+    if (v < 0 || v > INT_MAX) return -1;
+    *out = (int)v;
+    return 0;
+}
+
+static char *read_entire_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long sz = ftell(f);
+    if (sz < 0) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = '\0';
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+static int starts_with(const char *s, const char *prefix) {
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static int ends_with(const char *s, const char *suffix) {
+    size_t sl = strlen(s), su = strlen(suffix);
+    if (su > sl) return 0;
+    return memcmp(s + (sl - su), suffix, su) == 0;
+}
+
+static int join_path(char *out, size_t outsz, const char *a, const char *b) {
+    if (!a || !b) return -1;
+    if (snprintf(out, outsz, "%s/%s", a, b) >= (int)outsz) return -1;
+    return 0;
+}
+
+static int resolve_default_sql_dir(char *out, size_t outsz, const char *argv0) {
+    const char *env = getenv("SQL_DIR");
+    if (env && *env) {
+        if (snprintf(out, outsz, "%s", env) >= (int)outsz) return -1;
+        return 0;
+    }
+
+    /* Prefer ./sql_options if present. */
+    struct stat st;
+    if (stat("sql_options", &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (snprintf(out, outsz, "sql_options") >= (int)outsz) return -1;
+        return 0;
+    }
+
+    /* Fallback: if binary is bin/network-encryptor, try ../sql_options. */
+    char rp[PATH_MAX];
+    if (argv0 && realpath(argv0, rp)) {
+        char rp2[PATH_MAX];
+        snprintf(rp2, sizeof(rp2), "%s", rp);
+        char *d = dirname(rp2);
+        char candidate[PATH_MAX];
+        if (snprintf(candidate, sizeof(candidate), "%s/../sql_options", d) < (int)sizeof(candidate)) {
+            if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
+                if (snprintf(out, outsz, "%s", candidate) >= (int)outsz) return -1;
+                return 0;
+            }
+        }
+    }
+
+    /* Last resort: relative name (may fail later with good error). */
+    if (snprintf(out, outsz, "sql_options") >= (int)outsz) return -1;
+    return 0;
+}
+
+static int find_sql_file_for_id(char *out, size_t outsz, const char *sql_dir, int config_id) {
+    if (!sql_dir || !*sql_dir) return -1;
+    DIR *d = opendir(sql_dir);
+    if (!d) return -1;
+
+    char idp[8];
+    snprintf(idp, sizeof(idp), "%02d", config_id);
+    char prefix[16];
+    snprintf(prefix, sizeof(prefix), "%s_", idp);
+
+    struct dirent *ent;
+    char best[PATH_MAX] = {0};
+    while ((ent = readdir(d)) != NULL) {
+        const char *name = ent->d_name;
+        if (name[0] == '.') continue;
+        if (!starts_with(name, prefix)) continue;
+        if (!ends_with(name, ".sql")) continue;
+        /* Pick lexicographically smallest match for determinism. */
+        if (!best[0] || strcmp(name, best) < 0) {
+            snprintf(best, sizeof(best), "%s", name);
+        }
+    }
+    closedir(d);
+
+    if (!best[0]) return -1;
+    return join_path(out, outsz, sql_dir, best);
+}
+
+static int exec_sql(PGconn *conn, const char *sql, const char *label) {
+    if (!sql || !*sql) return 0;
+    PGresult *res = PQexec(conn, sql);
+    ExecStatusType st = PQresultStatus(res);
+    if (!(st == PGRES_COMMAND_OK || st == PGRES_TUPLES_OK)) {
+        fprintf(stderr, "[DB] %s failed: %s\n", label ? label : "SQL", PQerrorMessage(conn));
+        if (res) PQclear(res);
+        return -1;
+    }
+    if (res) PQclear(res);
+    return 0;
+}
+
+static int exec_materialize_profile_policy(PGconn *conn, int config_id) {
+    char sql[4096];
+    int n = snprintf(
+        sql, sizeof(sql),
+        "BEGIN;\n"
+        "DO $$\n"
+        "BEGIN\n"
+        "    IF EXISTS (\n"
+        "        SELECT 1\n"
+        "        FROM xdp_profiles p\n"
+        "        JOIN xdp_profile_crypto_policies pc ON pc.profile_id = p.id\n"
+        "        WHERE p.config_id = %d\n"
+        "        LIMIT 1\n"
+        "    ) THEN\n"
+        "        -- keep existing profile/policy rows\n"
+        "    ELSE\n"
+        "        DELETE FROM xdp_profiles WHERE config_id = %d;\n"
+        "\n"
+        "        INSERT INTO xdp_profiles (\n"
+        "          config_id, profile_name, enabled, channel_bonding, description\n"
+        "        ) VALUES (\n"
+        "          %d, 'profile_default', 1, 1, 'auto profile for profile-based dispatch'\n"
+        "        );\n"
+        "\n"
+        "        INSERT INTO xdp_profile_locals (profile_id, ifname)\n"
+        "        SELECT p.id, l.ifname\n"
+        "        FROM xdp_profiles p\n"
+        "        JOIN xdp_local_configs l ON l.config_id = p.config_id\n"
+        "        WHERE p.config_id = %d;\n"
+        "\n"
+        "        INSERT INTO xdp_profile_wans (profile_id, ifname)\n"
+        "        SELECT p.id, w.ifname\n"
+        "        FROM xdp_profiles p\n"
+        "        JOIN xdp_wan_configs w ON w.config_id = p.config_id\n"
+        "        WHERE p.config_id = %d;\n"
+        "\n"
+        "        INSERT INTO xdp_profile_traffic_rules (profile_id, src_cidr, dst_cidr)\n"
+        "        SELECT p.id, r.src_cidr, r.dst_cidr\n"
+        "        FROM xdp_profiles p\n"
+        "        JOIN xdp_redirect_rules r ON r.config_id = p.config_id\n"
+        "        WHERE p.config_id = %d;\n"
+        "\n"
+        "        INSERT INTO xdp_profile_crypto_policies (\n"
+        "          id,\n"
+        "          profile_id,\n"
+        "          priority,\n"
+        "          action,\n"
+        "          protocol,\n"
+        "          src_cidr,\n"
+        "          src_port,\n"
+        "          dst_cidr,\n"
+        "          dst_port,\n"
+        "          crypto_mode,\n"
+        "          aes_bits,\n"
+        "          nonce_size,\n"
+        "          crypto_key\n"
+        "        )\n"
+        "        SELECT\n"
+        "          (100 + 256 * %d),\n"
+        "          p.id,\n"
+        "          100,\n"
+        "          CASE\n"
+        "            WHEN c.encrypt_layer = 2 THEN 'encrypt_l2'\n"
+        "            WHEN c.encrypt_layer = 3 THEN 'encrypt_l3'\n"
+        "            WHEN c.encrypt_layer = 4 THEN 'encrypt_l4'\n"
+        "            ELSE 'bypass'\n"
+        "          END,\n"
+        "          'Any',\n"
+        "          'Any',\n"
+        "          'Any',\n"
+        "          'Any',\n"
+        "          'Any',\n"
+        "          c.crypto_mode,\n"
+        "          c.aes_bits,\n"
+        "          c.nonce_size,\n"
+        "          c.crypto_key\n"
+        "        FROM xdp_profiles p\n"
+        "        JOIN xdp_configs c ON c.id = p.config_id\n"
+        "        WHERE p.config_id = %d;\n"
+        "    END IF;\n"
+        "END $$;\n"
+        "COMMIT;\n",
+        config_id, config_id, config_id,
+        config_id, config_id, config_id,
+        config_id, config_id);
+    if (n <= 0 || (size_t)n >= sizeof(sql)) return -1;
+    return exec_sql(conn, sql, "materialize profile/policy");
+}
+
 int main(int argc, char **argv) {
     if (!getenv("DB_HOST")) {
         load_env_from_file("/opt/db.env");
     }
+
+    /* Match xdp_load_option.sh defaults when env is not provided. */
+    setenv_default("DB_HOST", "localhost");
+    setenv_default("DB_PORT", "5432");
+    setenv_default("DB_NAME", "xdpdb");
+    setenv_default("DB_USER", "sep");
 
     const char *db_pass = getenv("DB_PASS");
     const char *keywords[] = {"host", "port", "dbname", "user", "password", "connect_timeout", NULL};
     const char *values[]   = {getenv("DB_HOST"), getenv("DB_PORT"), getenv("DB_NAME"), 
                               getenv("DB_USER"), db_pass, "10", NULL};
 
+    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        usage(argv[0]);
+        return 0;
+    }
+
     int config_id = -1;
+    const char *config_id_s = NULL;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-id") == 0 && i + 1 < argc) config_id = atoi(argv[++i]);
+        if (strcmp(argv[i], "-id") == 0 && i + 1 < argc) {
+            config_id_s = argv[++i];
+            if (parse_int_strict(config_id_s, &config_id) != 0) {
+                fprintf(stderr, "[FATAL] config_id must be a number (digits only)\n");
+                usage(argv[0]);
+                return 1;
+            }
+        }
     }
 
     if (config_id >= 0) {
-        PGconn *conn = PQconnectdbParams(keywords, values, 0);
-        if (PQstatus(conn) == CONNECTION_OK) {
-            char sql[128];
-            snprintf(sql, sizeof(sql), "NOTIFY %s, '%d';", NOTIFY_CHANNEL, config_id);
-            PQclear(PQexec(conn, sql));
+        if (!getenv("DB_HOST") || !getenv("DB_PORT") || !getenv("DB_NAME") || !getenv("DB_USER") || !db_pass) {
+            fprintf(stderr,
+                    "[FATAL] Missing DB env. Need DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS (or provide /opt/db.env)\n");
+            return 1;
         }
+
+        char sql_dir[PATH_MAX];
+        if (resolve_default_sql_dir(sql_dir, sizeof(sql_dir), argv[0]) != 0) {
+            fprintf(stderr, "[FATAL] Could not resolve SQL_DIR\n");
+            return 1;
+        }
+
+        char sql_file[PATH_MAX];
+        if (find_sql_file_for_id(sql_file, sizeof(sql_file), sql_dir, config_id) != 0) {
+            fprintf(stderr,
+                    "[FATAL] Không tìm thấy file SQL cho ID=%d trong folder %s (pattern: %02d_*.sql)\n",
+                    config_id, sql_dir, config_id);
+            return 1;
+        }
+
+        fprintf(stderr, "[LOAD] config_id=%d sql_file=%s\n", config_id, sql_file);
+
+        PGconn *conn = PQconnectdbParams(keywords, values, 0);
+        if (PQstatus(conn) != CONNECTION_OK) {
+            fprintf(stderr, "[FATAL] DB connection failed: %s", PQerrorMessage(conn));
+            PQfinish(conn);
+            return 1;
+        }
+
+        size_t sql_len = 0;
+        char *sql_blob = read_entire_file(sql_file, &sql_len);
+        if (!sql_blob) {
+            fprintf(stderr, "[FATAL] Could not read SQL file: %s (errno=%d)\n", sql_file, errno);
+            PQfinish(conn);
+            return 1;
+        }
+
+        if (exec_sql(conn, sql_blob, "import sql_options") != 0) {
+            free(sql_blob);
+            PQfinish(conn);
+            return 1;
+        }
+        free(sql_blob);
+
+        if (exec_materialize_profile_policy(conn, config_id) != 0) {
+            PQfinish(conn);
+            return 1;
+        }
+
+        char idbuf[32];
+        snprintf(idbuf, sizeof(idbuf), "%d", config_id);
+
+        const char *notifyParams[2] = { NOTIFY_CHANNEL, idbuf };
+        PGresult *notify_res = PQexecParams(
+            conn,
+            "SELECT pg_notify($1, $2);",
+            2,
+            NULL,
+            notifyParams,
+            NULL,
+            NULL,
+            0);
+        ExecStatusType st = PQresultStatus(notify_res);
+        if (!(st == PGRES_COMMAND_OK || st == PGRES_TUPLES_OK)) {
+            fprintf(stderr, "[FATAL] notify failed: %s", PQerrorMessage(conn));
+            if (notify_res) PQclear(notify_res);
+            PQfinish(conn);
+            return 1;
+        }
+        if (notify_res) PQclear(notify_res);
         PQfinish(conn);
+
+        fprintf(stderr, "[OK] Loaded option ID=%d and notified channel=%s\n", config_id, NOTIFY_CHANNEL);
         return 0;
     }
 
