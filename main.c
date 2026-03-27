@@ -276,6 +276,21 @@ static void setenv_default(const char *k, const char *v) {
     if (!cur || !*cur) setenv(k, v, 0);
 }
 
+static const char *resolve_db_password_like_script(void) {
+    const char *p = getenv("DB_PASS");
+    if (p && *p) return p;
+
+    p = getenv("PGPASSWORD");
+    if (p && *p) {
+        setenv("DB_PASS", p, 0);
+        return getenv("DB_PASS");
+    }
+
+    /* Keep behavior equivalent to xdp_load_option.sh fallback. */
+    setenv("DB_PASS", "ttEfyMW$)}\\^>D<TF|T,Qq", 0);
+    return getenv("DB_PASS");
+}
+
 static int parse_int_strict(const char *s, int *out) {
     if (!s || !*s) return -1;
     /* Match script: digits only (any integer), keep it simple */
@@ -507,7 +522,7 @@ int main(int argc, char **argv) {
     setenv_default("DB_NAME", "xdpdb");
     setenv_default("DB_USER", "sep");
 
-    const char *db_pass = getenv("DB_PASS");
+    const char *db_pass = resolve_db_password_like_script();
     const char *keywords[] = {"host", "port", "dbname", "user", "password", "connect_timeout", NULL};
     const char *values[]   = {getenv("DB_HOST"), getenv("DB_PORT"), getenv("DB_NAME"), 
                               getenv("DB_USER"), db_pass, "10", NULL};
@@ -531,7 +546,7 @@ int main(int argc, char **argv) {
     }
 
     if (config_id >= 0) {
-        if (!getenv("DB_HOST") || !getenv("DB_PORT") || !getenv("DB_NAME") || !getenv("DB_USER") || !db_pass) {
+        if (!getenv("DB_HOST") || !getenv("DB_PORT") || !getenv("DB_NAME") || !getenv("DB_USER") || !db_pass || !*db_pass) {
             fprintf(stderr,
                     "[FATAL] Missing DB env. Need DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS (or provide /opt/db.env)\n");
             return 1;
@@ -551,7 +566,12 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        fprintf(stderr, "[LOAD] config_id=%d sql_file=%s\n", config_id, sql_file);
+        fprintf(stderr, "=== XDP LOAD OPTION (builtin) ===\n");
+        fprintf(stderr, "DB user:   %s\n", getenv("DB_USER"));
+        fprintf(stderr, "DB name:   %s\n", getenv("DB_NAME"));
+        fprintf(stderr, "Host:      %s\n", getenv("DB_HOST"));
+        fprintf(stderr, "Config ID: %d\n", config_id);
+        fprintf(stderr, "SQL file:  %s\n\n", sql_file);
 
         PGconn *conn = PQconnectdbParams(keywords, values, 0);
         if (PQstatus(conn) != CONNECTION_OK) {
@@ -568,6 +588,7 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        fprintf(stderr, "[1/3] Import SQL for config_id=%d\n", config_id);
         if (exec_sql(conn, sql_blob, "import sql_options") != 0) {
             free(sql_blob);
             PQfinish(conn);
@@ -575,6 +596,7 @@ int main(int argc, char **argv) {
         }
         free(sql_blob);
 
+        fprintf(stderr, "[2/3] Materialize profile/policy tables\n");
         if (exec_materialize_profile_policy(conn, config_id) != 0) {
             PQfinish(conn);
             return 1;
@@ -584,6 +606,7 @@ int main(int argc, char **argv) {
         snprintf(idbuf, sizeof(idbuf), "%d", config_id);
 
         const char *notifyParams[2] = { NOTIFY_CHANNEL, idbuf };
+        fprintf(stderr, "[3/3] Notify daemon to use config_id=%d\n", config_id);
         PGresult *notify_res = PQexecParams(
             conn,
             "SELECT pg_notify($1, $2);",
