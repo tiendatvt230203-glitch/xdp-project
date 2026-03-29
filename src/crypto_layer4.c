@@ -108,7 +108,7 @@ int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     if (transport_hdr_size < 0)
         return (int)pkt_len;
 
-    /* L4 mode here means: keep L2/L3/L4 headers visible, encrypt only L4 payload (L7 data). */
+  
     int enc_off = transport_off + transport_hdr_size;
     size_t enc_len = pkt_len - (size_t)enc_off;
     if (enc_len == 0)
@@ -152,7 +152,7 @@ int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
     packet[l3_off + 10] = (uint8_t)(cksum >> 8);
     packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-    /* TCP checksum must be recomputed when we mutate TCP/UDP payload. */
+
     size_t new_pkt_len = pkt_len + (size_t)total_overhead;
     if (ip_proto == 6) {
         uint8_t *tcp_seg = packet + transport_off;

@@ -79,14 +79,14 @@ int crypto_l4_extract_policy_id_ipv4(uint8_t *pkt,
 
         for (int i = 0; i < 4; i++) {
             int ns = candidates[i];
-            /* Full-segment L4 TCP tunnel immediately after IP */
+
             if (transport_off + ns + 1 < (int)pkt_len &&
                 pkt[transport_off + ns + 1] == L4_TUNNEL_MAGIC) {
                 *nonce_size_out = ns;
                 *policy_id_out = (uint8_t)(pkt[transport_off + ns] & 0x7F);
                 return 0;
             }
-            /* Legacy tunnel after TCP header */
+
             if (legacy_tun + ns + 1 < (int)pkt_len &&
                 pkt[legacy_tun + ns + 1] == L4_TUNNEL_MAGIC) {
                 *nonce_size_out = ns;
@@ -185,7 +185,7 @@ int crypto_decrypt_packet_auto_by_action(
                 return 0;
         }
 
-        /* Strict match: only decrypt when magic + policy_id match. */
+
         for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
             const struct crypto_policy *cp = &cfg->policies[pi];
             if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4)
@@ -233,11 +233,11 @@ int crypto_decrypt_packet_auto_by_action(
             return 0;
         }
 
-        /* Not an L4-encrypted packet for any configured policy => pass. */
+
         return 0;
     }
 
-    /* Fallback brute-force. */
+
     for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
         const struct crypto_policy *cp = &cfg->policies[pi];
         if (!cp || cp->action != action_layer)

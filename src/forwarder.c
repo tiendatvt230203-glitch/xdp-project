@@ -29,7 +29,7 @@
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
 
-/* Debug mode: keep single worker to simplify tracing. */
+
 #define NUM_WORKERS 1
 #define WORKER_RING_SIZE 4096
 
@@ -41,21 +41,18 @@ static int crypto_layer = 0;
 
 static struct flow_table g_flow_table;
 
-/* Crypto contexts per DB policy (used for per-policy key). */
+
 static struct packet_crypto_ctx g_policy_crypto_ctx[MAX_CRYPTO_POLICIES];
 static int g_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
 
-/* Used to keep thread-local crypto params in sync for legacy paths. */
+
 static struct app_config *g_cfg_ptr = NULL;
 
 static int select_wan_idx_for_packet(struct forwarder *fwd,
                                      uint32_t src_ip, uint32_t dst_ip,
                                      uint16_t src_port, uint16_t dst_port,
                                      uint8_t protocol, uint32_t pkt_len) {
-    /* Keep crypto policy selection independent from WAN selection.
-     * WAN selection should be profile-aware:
-     * - If the matched profile has multiple WANs, rotate only within that WAN pool.
-     * - Otherwise, keep the legacy behavior (rotate across all WANs via flow_table). */
+
     (void)pkt_len;
 
     if (fwd && fwd->cfg && fwd->cfg->profile_count > 0) {
@@ -171,7 +168,7 @@ struct queue_thread_args {
 
 static void pin_thread_to_core(int core_id) {
     (void)core_id;
-    /* Debug simplify: force all threads onto core 0. */
+
     core_id = 0;
 
     cpu_set_t cpuset;
@@ -224,7 +221,7 @@ static int decrypt_packet_auto_l2(struct forwarder *fwd,
     if (!crypto_enabled || !fwd || !fwd->cfg || !pkt || !pkt_len)
         return -1;
 
-    /* If it's not L2-encrypted (fake ethertype marker not present), decrypt is a no-op. */
+
     uint8_t pkt_marker = pkt[12];
     uint16_t fake_ipv4 = packet_crypto_get_fake_ethertype_ipv4();
     uint16_t fake_ipv6 = packet_crypto_get_fake_ethertype_ipv6();
@@ -241,7 +238,7 @@ static int decrypt_packet_auto_l2(struct forwarder *fwd,
         return 0;
     }
 
-    /* L2 policy id is stored in dedicated byte offset 13. */
+
     uint8_t policy_id = (uint8_t)(pkt[13] & 0x7F);
 
     for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
@@ -261,19 +258,17 @@ static int decrypt_packet_auto_l2(struct forwarder *fwd,
         return 0;
     }
 
-    /* marker matches but policy not found => cannot decrypt. */
+
     return -1;
 }
 
-/* Extract L4 tunnel policy_id and nonce_size from IPv4 packet.
- * We use: tunnel_off + nonce_size + 1 == L4_TUNNEL_MAGIC
- * policy_id is stored at tunnel_off + nonce_size. */
+
 static int l4_extract_policy_id_ipv4(uint8_t *pkt, uint32_t pkt_len,
                                        uint8_t *policy_id_out, int *nonce_size_out) {
     if (!pkt || !policy_id_out || !nonce_size_out)
         return -1;
 
-    /* Moved to module for easier debugging. */
+
     return crypto_l4_extract_policy_id_ipv4(pkt, pkt_len, policy_id_out, nonce_size_out);
 }
 
@@ -282,7 +277,7 @@ static int l3_extract_policy_id(uint8_t *pkt, uint32_t pkt_len,
     if (!pkt || !policy_id_out || pkt_len < 14 + 20)
         return -1;
 
-    /* Moved to module for easier debugging. */
+
     return crypto_l3_extract_policy_id(pkt, pkt_len, policy_id_out);
 }
 
@@ -696,7 +691,7 @@ static void *local_queue_thread_l2(void *arg) {
                 if (cp->action == POLICY_ACTION_BYPASS) {
                     bypass_crypto = 1;
                 } else if (cp->action != POLICY_ACTION_ENCRYPT_L2) {
-                    /* Mixed layers within a single forwarder instance are not supported yet. */
+
                     bypass_crypto = 1;
                 } else {
                     int pi = (int)(cp - fwd->cfg->policies);
@@ -709,7 +704,7 @@ static void *local_queue_thread_l2(void *arg) {
                         apply_crypto_params_from_policy(cp);
                 }
             } else {
-                /* If no policy matches (e.g. redirect-all debugging), do not encrypt. */
+
                 bypass_crypto = 1;
             }
 
@@ -768,7 +763,7 @@ static void *local_queue_thread_l3l4(void *arg) {
         if (rcvd <= 0)
             continue;
 
-        /* L3/L4: enqueue to worker ring */
+
         for (int i = 0; i < rcvd; i++) {
             struct packet_job job;
             job.fwd = fwd;
@@ -847,7 +842,7 @@ static void *wan_queue_thread_l2(void *arg) {
             uint8_t *final_pkt = pkt;
             uint32_t final_len = pkt_len;
 
-            /* L2 decrypt */
+
             if (decrypt_packet_auto_l2(fwd, pkt, &pkt_len,
                                         decrypt_scratch, sizeof(decrypt_scratch)) != 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
@@ -856,7 +851,7 @@ static void *wan_queue_thread_l2(void *arg) {
             final_pkt = pkt;
             final_len = pkt_len;
 
-            /* Forward to local */
+
             uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
             if (dest_ip == 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
@@ -975,11 +970,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     apply_default_crypto_params(fwd);
             }
 
-            /* Mixed-layer decrypt dispatch:
-             * 1) If L2 marker present, decrypt L2 first.
-             * 2) Then attempt L3 decrypt (auto bypass if not encrypted/matching).
-             * 3) Then attempt L4 decrypt (auto bypass if not encrypted/matching).
-             */
+
             {
                 uint8_t pkt_marker = pkt[12];
                 uint16_t fake_ipv4 = packet_crypto_get_fake_ethertype_ipv4();
@@ -1015,15 +1006,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
             final_pkt = pkt;
             final_len = pkt_len;
 
-            /*
-             * final_pkt/final_len set above for either:
-             * - L4 fragment reassembled
-             * - L4 non-fragment decrypted
-             * - L3 fragment reassembled
-             * - L3 non-fragment decrypted
-             */
 
-            /* Forward to local */
             uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
             if (dest_ip == 0) {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
@@ -1151,7 +1134,7 @@ static void *worker_thread(void *arg) {
 
         uint32_t pkt_len = job.pkt_len;
 
-        /* Per-packet crypto policy selection (keys/mode/aes_bits/nonce + bypass). */
+
         const struct crypto_policy *cp = NULL;
         struct packet_crypto_ctx *use_ctx = &crypto_ctx;
         int bypass_crypto = 0;
@@ -1177,7 +1160,7 @@ static void *worker_thread(void *arg) {
                             apply_crypto_params_from_policy(cp);
                     }
                 } else {
-                    /* If no policy matches, do not encrypt (redirect-all debugging). */
+
                     bypass_crypto = 1;
                 }
             }
@@ -1353,9 +1336,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     g_cfg_ptr = cfg;
     interface_reset_redirect_maps();
 
-    /* Debug simplify: single queue per interface.
-     * This removes a lot of thread/queue interleaving noise while you study
-     * ordering and packet transformations. */
+
     for (int i = 0; i < cfg->local_count; i++)
         cfg->locals[i].queue_count = 1;
     for (int i = 0; i < cfg->wan_count; i++)
@@ -1371,7 +1352,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             return -1;
         }
 
-        /* Initialize per-policy crypto contexts (keys derived by AES bits). */
+
         memset(g_policy_crypto_ctx_ready, 0, sizeof(g_policy_crypto_ctx_ready));
         for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
             const struct crypto_policy *cp = &cfg->policies[pi];
@@ -1396,7 +1377,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             g_policy_crypto_ctx_ready[pi] = 1;
         }
 
-        /* Check whether we need L2 fake ethertype markers. */
+
         for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
             if (cfg->policies[pi].action == POLICY_ACTION_ENCRYPT_L2 && g_policy_crypto_ctx_ready[pi]) {
                 has_encrypt_l2 = 1;
@@ -1409,7 +1390,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         packet_crypto_set_nonce_size(cfg->nonce_size);
         if (has_encrypt_l2) {
             if (cfg->fake_ethertype_ipv4 == 0 && cfg->fake_ethertype_ipv6 == 0) {
-                /* Runtime default for configs that only set encrypt_layer=2 in DB. */
+
                 cfg->fake_ethertype_ipv4 = 0x88b5;
                 cfg->fake_ethertype_ipv6 = 0x88b6;
             }
@@ -1423,8 +1404,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
     }
 
-    /* Do not auto-expand queue_count to NIC max: interface.c binds min(cfg, HW).
-     * Keeping cfg->locals[].queue_count / wans[].queue_count as set above (e.g. 1 for debug). */
+
 
     uint32_t wan_window_sizes[MAX_INTERFACES] = {0};
     for (int i = 0; i < cfg->wan_count && i < MAX_INTERFACES; i++)
@@ -1451,11 +1431,11 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         fwd->local_count++;
     }
 
-    /* Push redirect CIDR rules to XDP config_map after BPF object is loaded. */
+
     if (cfg->redirect.src_count > 0 || cfg->redirect.dst_count > 0) {
         if (interface_push_redirect_cfg(&cfg->redirect) != 0) {
             fprintf(stderr, "[XDP] Failed to push redirect rules to config_map\n");
-            /* Không fail hẳn forwarder: chỉ mất tính năng redirect. */
+
         }
     }
 
@@ -1480,13 +1460,13 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
         fwd->wan_count++;
         if (cfg->wans[i].dst_ip != 0) {
-            /* Ensure TX path does not override ARP-resolved MAC with legacy static MAC fields. */
+
             memset(fwd->wans[i].dst_mac, 0, MAC_LEN);
             memset(fwd->wans[i].src_mac, 0, MAC_LEN);
         }
     }
 
-    /* WAN L2 dest MAC via ARP on peer (dst_ip / Sep); requires same L2 segment as this iface. */
+
     for (int i = 0; i < fwd->wan_count; i++) {
         if (cfg->wans[i].dst_ip == 0) {
             fprintf(stderr,

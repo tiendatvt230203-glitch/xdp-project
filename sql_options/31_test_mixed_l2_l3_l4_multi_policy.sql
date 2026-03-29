@@ -9,7 +9,7 @@ DELETE FROM xdp_wan_configs   WHERE config_id = 31;
 DELETE FROM xdp_redirect_rules WHERE config_id = 31;
 DELETE FROM xdp_configs       WHERE id = 31;
 
--- encrypt_layer: legacy global (2/3/4); forwarder still uses local L3/L4 workers + per-policy action for crypto.
+
 INSERT INTO xdp_configs (
     id,
     crypto_enabled,
@@ -22,7 +22,7 @@ INSERT INTO xdp_configs (
 ) VALUES
 (31, 1, '2b7e151628aed2a6abf7158809cf4f3c', 3, 99, 'ctr', 128, 16);
 
--- Hai NIC local: mỗi card một prefix LAN (đổi mapping nếu dây/subnet thực tế khác).
+
 INSERT INTO xdp_local_configs (
     config_id,
     ifname,
@@ -51,7 +51,7 @@ INSERT INTO xdp_profiles (
 (31, 'profile_9_to_182',  1, 1, '192.168.9.2 <-> 192.168.182.2 via WAN1+WAN2'),
 (31, 'profile_10_to_180', 1, 1, '192.168.10.2 <-> 192.168.180.2 via WAN2+WAN3');
 
--- profile_9_to_182 dùng enp7s0; profile_10_to_180 dùng eno2.
+
 INSERT INTO xdp_profile_locals (profile_id, ifname)
 SELECT p.id, w.ifname
 FROM xdp_profiles p
@@ -62,9 +62,7 @@ JOIN (VALUES
 ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 
--- Profile-specific WAN pools:
---   profile_9_to_182  -> WAN1+WAN2 (enp4s0,enp5s0)
---   profile_10_to_180 -> WAN2+WAN3 (enp5s0,enp6s0)
+
 INSERT INTO xdp_profile_wans (profile_id, ifname)
 SELECT p.id, w.ifname
 FROM xdp_profiles p
@@ -77,12 +75,12 @@ JOIN (VALUES
 ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 
--- XDP redirect rules (make sure traffic reaches userspace forwarder).
+
 INSERT INTO xdp_redirect_rules (config_id, src_cidr, dst_cidr) VALUES
 (31, '192.168.9.0/24',  '192.168.182.0/24'),
 (31, '192.168.10.0/24', '192.168.180.0/24');
 
--- One rule is enough: config_select_profile_for_flow() matches the reverse direction too.
+
 INSERT INTO xdp_profile_traffic_rules (profile_id, src_cidr, dst_cidr)
 SELECT p.id, '192.168.9.0/24', '192.168.182.0/24'
 FROM xdp_profiles p
@@ -93,10 +91,7 @@ SELECT p.id, '192.168.10.0/24', '192.168.180.0/24'
 FROM xdp_profiles p
 WHERE p.config_id = 31 AND p.profile_name = 'profile_10_to_180';
 
--- Policies:
--- - UDP -> L3 GCM
--- - TCP -> L4 CTR
--- NOTE: policy IDs must be consistent on both sites (policy_id on-wire = id & 0x7F).
+
 
 INSERT INTO xdp_profile_crypto_policies (
     id,
@@ -117,7 +112,7 @@ SELECT
     201,
     p.id,
     100,
-    'encrypt_l3',
+    'encrypt_l4',
     'UDP',
     'Any',
     'Any',

@@ -9,12 +9,7 @@
 #include <linux/sockios.h>
 #include <linux/if.h>
 
-/* NOTE:
- * With multiple local interfaces, sharing one global bpf_obj/xsks_map causes
- * queue key collisions (qid=0 from iface A overwritten by iface B).
- * Keep one BPF object/map instance per local iface init, and fan-out redirect
- * config updates to all discovered local config_map fds.
- */
+
 static int config_map_fds[MAX_INTERFACES];
 static int config_map_fd_count = 0;
 
@@ -33,7 +28,7 @@ static void register_config_map_fd(int fd) {
         config_map_fds[config_map_fd_count++] = fd;
 }
 
-/* bpf_set_link_xdp_fd(-1) must use the same attachment class (SKB vs DRV/HW) or the program stays loaded. */
+
 static void interface_xdp_try_detach(int ifindex, const char *ifname) {
     static const int modes[] = {
         XDP_FLAGS_SKB_MODE,
@@ -96,7 +91,7 @@ int interface_get_queue_count(const char *ifname) {
     return get_rx_queue_count(ifname);
 }
 
-/* Use min(cfg, HW): forwarder may force queue_count=1 for debugging; never ignore cfg. */
+
 static int effective_xsk_queue_count(const char *ifname, int cfg_q) {
     int hw = get_rx_queue_count(ifname);
     if (hw < 1)
@@ -1128,8 +1123,7 @@ int interface_send_batch_queue(struct xsk_interface *iface, int queue_idx,
                         iface->dst_mac[3] | iface->dst_mac[4] | iface->dst_mac[5]);
         int have_src = (iface->src_mac[0] | iface->src_mac[1] | iface->src_mac[2] |
                         iface->src_mac[3] | iface->src_mac[4] | iface->src_mac[5]);
-        /* Preserve caller-provided L2 addresses (e.g. WAN next-hop ARP rewrite).
-         * Only apply interface static MACs when they are explicitly configured. */
+
         if (have_dst)
             memcpy(eth->ether_dhost, iface->dst_mac, MAC_LEN);
         if (have_src)
@@ -1200,12 +1194,12 @@ int interface_send_to_local_batch_queue(struct xsk_interface *iface,
         __sync_fetch_and_add(&queue->tx_wait_loops, 1);
         if (total_loops++ >= LOCAL_TX_MAX_WAIT_LOOPS) {
             pthread_mutex_unlock(&queue->tx_lock);
-            return -1;  /* drop packet, let WAN thread keep draining */
+            return -1;
         }
         sendto(xsk_socket__fd(queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         queue->pending_tx_count = 0;
         if (wait_loops++ > 50) {
-            usleep(100);  /* give kernel time to drain, reduce CPU spin */
+            usleep(100); 
             wait_loops = 0;
         }
         sched_yield();

@@ -1,6 +1,5 @@
 #include "../inc/db_config.h"
 #include "../inc/config.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,7 +87,7 @@ static int parse_cidr_any_or_negated(const char *v_in, int *any_out, int *neg_ou
         return 0;
     }
 
-    /* Support negation prefix: !<cidr> */
+
     while (*v_in == ' ' || *v_in == '\t') v_in++;
     if (v_in[0] == '!') {
         *neg_out = 1;
@@ -131,7 +130,7 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         1, NULL, params, NULL, NULL, 0);
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        /* Backward-compatible path: old schema without profile tables. */
+
         PQclear(res);
         return 0;
     }
@@ -234,7 +233,7 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                 const char *nonce = PQgetvalue(res, r, 10);
                 const char *key_hex = PQgetvalue(res, r, 11);
 
-                /* If parsing fails, treat as ANY to avoid accidentally dropping traffic. */
+
                 if (parse_cidr_any_or_negated(src_cidr, &cp->src_any, &cp->src_negate,
                                               &cp->src_net, &cp->src_mask) != 0) {
                     cp->src_any = 1;
@@ -405,7 +404,7 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
-        /* Backward-compatible MAC columns (legacy schema). */
+
         int src_mac_col = PQfnumber(res, "src_mac");
         int dst_mac_col = PQfnumber(res, "dst_mac");
         if (src_mac_col >= 0) {
@@ -423,7 +422,7 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
-        /* Optional per-WAN quota (bytes threshold per flow before rotating WAN). */
+
         int ws_col = PQfnumber(res, "window_size_kb");
         if (ws_col >= 0) {
             v = PQgetvalue(res, row, ws_col);
@@ -592,7 +591,7 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
-        /* WAN: dst_ip = peer (Sep); dest Ethernet MAC = ARP(dst_ip). Local IP from kernel iface. */
+
         PGresult *res = PQexecParams(conn,
             "SELECT ifname, dst_ip, window_size_kb "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",

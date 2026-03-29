@@ -22,7 +22,7 @@ struct flow_entry {
     int current_wan;
     uint64_t last_seen;
     int valid;
-    /* When set, WAN rotation/grouping is done only by src_ip/dst_ip (ignore ports/protocol). */
+
     uint8_t ip_only_key;
     struct flow_entry *next;
 };
@@ -31,7 +31,7 @@ struct flow_table {
     struct flow_entry *buckets[FLOW_TABLE_SIZE];
     pthread_mutex_t locks[FLOW_TABLE_SIZE];
     int wan_count;
-    uint32_t wan_window_sizes[MAX_INTERFACES]; /* bytes threshold per WAN */
+    uint32_t wan_window_sizes[MAX_INTERFACES]; 
 };
 
 void flow_table_init(struct flow_table *ft, const uint32_t *wan_window_sizes, int wan_count);
@@ -42,10 +42,7 @@ int flow_table_get_wan(struct flow_table *ft,
                        uint16_t src_port, uint16_t dst_port,
                        uint8_t protocol, uint32_t pkt_len);
 
-/* Profile-aware WAN selection:
- * - allowed_wans is a list of global WAN indices that this profile can use.
- * - WAN rotation on quota happens only within allowed_wans.
- * - If allowed_count <= 1, caller should fallback to flow_table_get_wan(). */
+
 int flow_table_get_wan_profile(struct flow_table *ft,
                                 uint32_t src_ip, uint32_t dst_ip,
                                 uint16_t src_port, uint16_t dst_port,

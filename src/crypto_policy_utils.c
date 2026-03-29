@@ -12,7 +12,7 @@ void crypto_apply_default_from_cfg(const struct app_config *cfg) {
     packet_crypto_set_nonce_size(cfg->nonce_size);
     packet_crypto_set_fake_protocol((uint8_t)(cfg->fake_protocol & 0xFF));
     packet_crypto_set_policy_id(0);
-    /* Default encrypt_layer uses global config. */
+
     packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
 }
 
@@ -24,8 +24,7 @@ void crypto_apply_from_policy(const struct crypto_policy *cp) {
     packet_crypto_set_aes_bits(cp->aes_bits);
     packet_crypto_set_nonce_size(cp->nonce_size);
 
-    /* packet_encrypt()/packet_decrypt() dispatch by thread-local encrypt_layer.
-     * When DB mixes L3/L4/L2 within one forwarder config, we must override it per-policy. */
+
     if (cp->action == POLICY_ACTION_ENCRYPT_L2)
         packet_crypto_set_encrypt_layer(2);
     else if (cp->action == POLICY_ACTION_ENCRYPT_L3)

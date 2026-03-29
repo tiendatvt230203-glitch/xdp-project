@@ -99,7 +99,7 @@ struct local_config {
 
 struct wan_config {
     char ifname[IF_NAMESIZE];
-    uint32_t dst_ip;      /* peer WAN IPv4 (network byte order); local IP from kernel iface */
+    uint32_t dst_ip;      
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
     uint32_t window_size;

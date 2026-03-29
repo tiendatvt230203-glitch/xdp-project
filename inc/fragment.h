@@ -12,7 +12,7 @@
 #define FRAG_FLAG_BIT       0x80
 #define FRAG_MTU            1500
 
-/* Chỉ rã gói khi sau khi mã hóa kích thước > FRAG_MTU (1500B). Nếu ≤1500 thì không rã. */
+
 #define FRAG_TABLE_SIZE     4096
 #define FRAG_TIMEOUT_NS     (200ULL * 1000000ULL)
 
@@ -39,7 +39,7 @@ void frag_table_init(struct frag_table *ft);
 
 void frag_table_gc(struct frag_table *ft);
 
-/* L3: overhead = tunnel(nonce+1) + FRAG_HDR(3) + [GCM tag 16]. Rã khi (pkt_len + overhead) > 1500. */
+
 static inline int frag_need_split(uint32_t pkt_len) {
     int overhead = packet_crypto_get_tunnel_hdr_size() + FRAG_HDR_SIZE;
     if (packet_crypto_get_mode() == 1)
@@ -47,7 +47,7 @@ static inline int frag_need_split(uint32_t pkt_len) {
     return (pkt_len + overhead) > FRAG_MTU;
 }
 
-/* L4: overhead = tunnel(nonce+1) + FRAG_L4_HDR(4) + [GCM tag 16]. Rã khi (pkt_len + overhead) > 1500. */
+
 static inline int frag_need_split_l4(uint32_t pkt_len) {
     int overhead = packet_crypto_get_tunnel_hdr_size() + FRAG_L4_HDR_SIZE;
     if (packet_crypto_get_mode() == 1)
@@ -55,7 +55,7 @@ static inline int frag_need_split_l4(uint32_t pkt_len) {
     return (pkt_len + overhead) > FRAG_MTU;
 }
 
-/* L2: overhead = nonce + [GCM tag 16]. Rã khi (pkt_len + overhead) > 1500. */
+
 static inline int frag_need_split_l2(uint32_t pkt_len) {
     int nonce_size = packet_crypto_get_nonce_size();
     int overhead = nonce_size;

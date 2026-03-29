@@ -55,7 +55,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
     __u16 proto = eth->h_proto;
 
-    /* Keep ARP in kernel stack for next-hop MAC resolution. */
+
     if (proto == __constant_htons(ETH_P_ARP)) {
         inc_stat(STAT_ARP_PASS);
         return XDP_PASS;
@@ -65,7 +65,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end)
             return XDP_PASS;
-        /* Keep WAN underlay ping/icmp in kernel path. */
+
         if (ip->protocol == IPPROTO_ICMP_VAL) {
             inc_stat(STAT_ICMP_PASS);
             return XDP_PASS;
@@ -76,9 +76,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == __constant_htons(ETH_P_IPV6))
         goto redirect;
 
-    /* Also redirect packets that were "L2-encrypted" by userspace.
-     * For L2 encryption, ether_type is replaced with a fake ethertype where
-     * only the high 8 bits are a marker; the low 8 bits are nonce bytes. */
+
     int key0 = 0, key1 = 1;
     __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
     if (fake4 && *fake4 != 0 &&
@@ -95,7 +93,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
 redirect:
     ;
-    /* Keep deterministic mapping with userspace sockets created for queue 0 only. */
+
     int queue_id = 0;
     int ret = bpf_redirect_map(&wan_xsks_map, queue_id, XDP_PASS);
 
@@ -109,6 +107,3 @@ redirect:
 }
 
 char _license[] SEC("license") = "GPL";
-
-
-

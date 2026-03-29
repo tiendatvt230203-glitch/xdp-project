@@ -100,14 +100,13 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Keep ICMP in kernel path for normal reachability/debug ping. */
+
     if (l4_proto == IPPROTO_ICMP_VAL) {
         inc_stat(4);
         return XDP_PASS;
     }
 
-    /* Redirect only flows matching configured src/dst CIDR rules.
-     * This keeps unrelated host traffic (e.g. WAN underlay ping) in kernel path. */
+
     __u32 cfg_key = 0;
     struct redirect_cfg *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
     if (!cfg) {
@@ -139,10 +138,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Debug/compat: userspace forwarder typically only creates AF_XDP sockets
-     * for queue 0 (cfg->queue_count=1). RSS may send flows to other RX queues,
-     * which would make xsks_map lookup fail and leave packets in kernel path.
-     * Always redirect to queue 0 to make matching deterministic. */
+
     __u32 qid = 0;
     int *sock = bpf_map_lookup_elem(&xsks_map, &qid);
     if (!sock) {

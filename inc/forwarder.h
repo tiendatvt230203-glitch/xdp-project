@@ -19,7 +19,7 @@ struct forwarder {
     uint64_t wan_to_local;
     uint64_t total_dropped;
 
-    /* Drop detail counters (especially useful in no-crypto mode) */
+
     uint64_t dropped_bad_ip;
     uint64_t dropped_no_local_match;
     uint64_t dropped_local_tx_fail;

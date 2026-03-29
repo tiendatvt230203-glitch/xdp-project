@@ -24,9 +24,9 @@ CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     window_size_kb INT DEFAULT 8192
 );
 
-/* Backward/forward compatible migration for existing deployments. */
+
 ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS dst_ip VARCHAR(32) DEFAULT '';
-/* Local WAN IP comes from kernel iface; drop legacy / obsolete columns. */
+
 ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS src_ip;
 ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS next_hop_ip;
 
@@ -73,16 +73,16 @@ CREATE TABLE IF NOT EXISTS xdp_profile_crypto_policies (
     id SERIAL PRIMARY KEY,
     profile_id INT NOT NULL REFERENCES xdp_profiles(id) ON DELETE CASCADE,
     priority INT DEFAULT 100,
-    action VARCHAR(32) NOT NULL,              -- bypass / encrypt_l2 / encrypt_l3 / encrypt_l4
-    protocol VARCHAR(16) DEFAULT 'ANY',       -- TCP/UDP/ICMP/OSPF/ANY
+    action VARCHAR(32) NOT NULL,             
+    protocol VARCHAR(16) DEFAULT 'ANY',      
     src_cidr TEXT DEFAULT 'ANY',
-    src_port VARCHAR(32) DEFAULT 'ANY',       -- ANY / 443 / 1000-2000
+    src_port VARCHAR(32) DEFAULT 'ANY',       
     dst_cidr TEXT DEFAULT 'ANY',
     dst_port VARCHAR(32) DEFAULT 'ANY',
-    crypto_mode VARCHAR(16) DEFAULT 'gcm',    -- gcm / ctr
-    aes_bits INT DEFAULT 128,                 -- 128 / 256
+    crypto_mode VARCHAR(16) DEFAULT 'gcm',    
+    aes_bits INT DEFAULT 128,                 
     nonce_size INT DEFAULT 12,
-    crypto_key TEXT                           -- hex string
+    crypto_key TEXT                           
 );
 
 CREATE INDEX IF NOT EXISTS idx_profiles_config_id ON xdp_profiles(config_id);

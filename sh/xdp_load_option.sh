@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DB_USER="sep"
+DB_NAME="xdpdb"
+DB_HOST="localhost"
+SQL_DIR="sql_options"
+export PGPASSWORD='ttEfyMW$)}\^>D<TF|T,Qq'
+
+usage() {
+  echo "Usage: $0 <config_id>"
+  echo
+  echo "  config_id: dùng theo file sql_options/<id>_*.sql"
+  echo
+  echo "Ví dụ:"
+  echo "  $0 21  # L3 GCM 128 (ví dụ)"
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+CONFIG_ID="$1"
+
+if ! [[ "${CONFIG_ID}" =~ ^[0-9]+$ ]]; then
+  echo "config_id must be a number (any integer)"
+  exit 1
+fi
+
+ID_PADDED=$(printf "%02d" "${CONFIG_ID}")
+SQL_FILE_GLOB="${SQL_DIR}/${ID_PADDED}_*.sql"
+
+SQL_FILE=$(ls ${SQL_FILE_GLOB} 2>/dev/null || true)
+
+if [ -z "${SQL_FILE}" ]; then
+  echo "Không tìm thấy file SQL cho ID=${CONFIG_ID} trong folder ${SQL_DIR}"
+  echo "Đã thử pattern: ${SQL_FILE_GLOB}"
+  exit 1
+fi
+
+echo "=== XDP LOAD OPTION ==="
+echo "DB user:   ${DB_USER}"
+echo "DB name:   ${DB_NAME}"
+echo "Host:      ${DB_HOST}"
+echo "Config ID: ${CONFIG_ID}"
+echo "SQL file:  ${SQL_FILE}"
+echo
+
+echo "[1/3] Import SQL for config_id=${CONFIG_ID}"
+psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -f "${SQL_FILE}"
+
+echo "[2/3] Materialize profile/policy tables (profile-based dispatch)"
+psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" <<SQL
+BEGIN;
+
+DO \$\$
+BEGIN
+    /*
+     * If user already populated xdp_profile_crypto_policies for this config_id
+     * (i.e. they want custom Table-2-like rules), then do not overwrite.
+     */
+    IF EXISTS (
+        SELECT 1
+        FROM xdp_profiles p
+        JOIN xdp_profile_crypto_policies pc ON pc.profile_id = p.id
+        WHERE p.config_id = ${CONFIG_ID}
+        LIMIT 1
+    ) THEN
+        -- keep existing profile/policy rows
+    ELSE
+        -- Rebuild profiles for this config_id from the legacy tables:
+        -- xdp_configs, xdp_local_configs, xdp_wan_configs, xdp_redirect_rules.
+        DELETE FROM xdp_profiles WHERE config_id = ${CONFIG_ID};
+
+        INSERT INTO xdp_profiles (
+          config_id, profile_name, enabled, channel_bonding, description
+        ) VALUES (
+          ${CONFIG_ID}, 'profile_default', 1, 1, 'auto profile for profile-based dispatch'
+        );
+
+        -- Map locals and wans to the profile (by interface ifname)
+        INSERT INTO xdp_profile_locals (profile_id, ifname)
+        SELECT p.id, l.ifname
+        FROM xdp_profiles p
+        JOIN xdp_local_configs l ON l.config_id = p.config_id
+        WHERE p.config_id = ${CONFIG_ID};
+
+        INSERT INTO xdp_profile_wans (profile_id, ifname)
+        SELECT p.id, w.ifname
+        FROM xdp_profiles p
+        JOIN xdp_wan_configs w ON w.config_id = p.config_id
+        WHERE p.config_id = ${CONFIG_ID};
+
+        -- Traffic rules = redirect rules for this config_id
+        INSERT INTO xdp_profile_traffic_rules (profile_id, src_cidr, dst_cidr)
+        SELECT p.id, r.src_cidr, r.dst_cidr
+        FROM xdp_profiles p
+        JOIN xdp_redirect_rules r ON r.config_id = p.config_id
+        WHERE p.config_id = ${CONFIG_ID};
+
+        -- One policy that matches all traffic in the profile.
+        -- The policy action is derived from xdp_configs.encrypt_layer.
+        INSERT INTO xdp_profile_crypto_policies (
+          id,
+          profile_id,
+          priority,
+          action,
+          protocol,
+          src_cidr,
+          src_port,
+          dst_cidr,
+          dst_port,
+          crypto_mode,
+          aes_bits,
+          nonce_size,
+          crypto_key
+        )
+        SELECT
+          -- Deterministic PK per config_id (unique globally).
+          (100 + 256 * ${CONFIG_ID}),
+          p.id,
+          100,
+          CASE
+            WHEN c.encrypt_layer = 2 THEN 'encrypt_l2'
+            WHEN c.encrypt_layer = 3 THEN 'encrypt_l3'
+            WHEN c.encrypt_layer = 4 THEN 'encrypt_l4'
+            ELSE 'bypass'
+          END,
+          'Any',
+          'Any',
+          'Any',
+          'Any',
+          'Any',
+          c.crypto_mode,
+          c.aes_bits,
+          c.nonce_size,
+          c.crypto_key
+        FROM xdp_profiles p
+        JOIN xdp_configs c ON c.id = p.config_id
+        WHERE p.config_id = ${CONFIG_ID};
+    END IF;
+END \$\$;
+
+COMMIT;
+SQL
+
+echo "[3/3] Notify daemon to use config_id=${CONFIG_ID}"
+psql -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT pg_notify('xdp_start', '${CONFIG_ID}');"
+
+echo
+echo "Đã load option ID=${CONFIG_ID}, materialize profile/policy, và gửi NOTIFY. Kiểm tra log của daemon để xác nhận."
+

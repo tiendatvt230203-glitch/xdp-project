@@ -156,10 +156,10 @@ int config_select_profile_for_flow(struct app_config *cfg, uint32_t src_ip, uint
             continue;
         for (int r = 0; r < p->traffic_rule_count; r++) {
             struct profile_traffic_rule *tr = &p->traffic_rules[r];
-            /* Forward: src in rule src CIDR, dst in rule dst CIDR */
+
             int forward = (src_ip & tr->src_mask) == (tr->src_net & tr->src_mask) &&
                           (dst_ip & tr->dst_mask) == (tr->dst_net & tr->dst_mask);
-            /* Reverse: same site-to-site pair (reply path encrypts on the far side) */
+
             int reverse = (src_ip & tr->dst_mask) == (tr->dst_net & tr->dst_mask) &&
                           (dst_ip & tr->src_mask) == (tr->src_net & tr->src_mask);
             if (forward || reverse)
@@ -209,8 +209,7 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
         return NULL;
 
     const struct profile_config *p = &cfg->profiles[profile_idx];
-    /* Prefer explicit TCP/UDP/... over POLICY_PROTO_ANY so e.g. a UDP+L3 row never
-     * steals TCP when the DB has NULL protocol (loaded as ANY) or an Any rule. */
+
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < p->policy_count; i++) {
             int pi = p->policy_indices[i];

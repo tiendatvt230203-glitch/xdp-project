@@ -255,7 +255,7 @@ int wan_rewrite_dest_mac(struct arp_cache *wan_cache,
     if (!wan_cache || !wan_cfg || !wan_iface || !pkt)
         return -1;
 
-    /* L2 dest MAC = Ethernet address of far-end peer (Sep), resolved by ARP on dst_ip. */
+
     if (wan_cfg->dst_ip != 0) {
         uint8_t dst_mac[6];
         if (arp_cache_lookup(wan_cache, wan_cfg->dst_ip, dst_mac)) {
@@ -267,7 +267,7 @@ int wan_rewrite_dest_mac(struct arp_cache *wan_cache,
         return -1;
     }
 
-    /* Backward-compatible fallback: static WAN MACs. */
+
     memcpy(pkt, wan_iface->dst_mac, 6);
     memcpy(pkt + 6, wan_iface->src_mac, 6);
     return 0;

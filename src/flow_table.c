@@ -19,7 +19,7 @@ static uint32_t flow_hash(uint32_t src_ip, uint32_t dst_ip,
 }
 
 static uint32_t flow_hash_ips(uint32_t src_ip, uint32_t dst_ip) {
-    /* Hash only by IP pair for IP-only WAN selection. */
+
     uint32_t hash = src_ip ^ dst_ip;
     hash ^= (hash >> 16);
     hash *= 0x85ebca6b;
@@ -105,7 +105,7 @@ int flow_table_get_wan(struct flow_table *ft,
             if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
                 cur_limit = ft->wan_window_sizes[entry->current_wan];
 
-            /* If this flow reached the WAN quota, rotate to next WAN. */
+
             if (cur_limit > 0 && entry->byte_count >= cur_limit) {
                 entry->byte_count = 0;
                 entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
@@ -178,7 +178,7 @@ int flow_table_get_wan_profile(struct flow_table *ft,
 
             int pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
             if (pos < 0) {
-                /* Same flow but allowed WAN set changed (should not happen often). Reset to first allowed. */
+
                 entry->current_wan = allowed_wans[0];
                 entry->byte_count = 0;
                 pos = 0;
@@ -191,7 +191,7 @@ int flow_table_get_wan_profile(struct flow_table *ft,
             if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
                 cur_limit = ft->wan_window_sizes[entry->current_wan];
 
-            /* If this flow reached the WAN quota, rotate to next allowed WAN. */
+
             if (cur_limit > 0 && entry->byte_count >= cur_limit) {
                 entry->byte_count = 0;
                 pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
@@ -238,10 +238,7 @@ void flow_table_add_bytes(struct flow_table *ft,
                           uint32_t src_ip, uint32_t dst_ip,
                           uint16_t src_port, uint16_t dst_port,
                           uint8_t protocol, uint32_t extra_bytes) {
-    /* Legacy entries use full 5-tuple match; IP-only entries use src/dst only.
-     * For IP-only entries we only add bytes (no rotate here) because flow_table_add_bytes
-     * doesn't know the allowed WAN subset; WAN rotation must remain driven by
-     * flow_table_get_wan_profile(...). */
+
 
     uint32_t idx_exact = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
     uint32_t idx_ip = flow_hash_ips(src_ip, dst_ip);
@@ -279,7 +276,7 @@ void flow_table_add_bytes(struct flow_table *ft,
         return;
     }
 
-    /* Update legacy exact-key entry */
+
     pthread_mutex_lock(&ft->locks[idx_exact]);
     struct flow_entry *entry = ft->buckets[idx_exact];
     while (entry) {
@@ -306,7 +303,7 @@ void flow_table_add_bytes(struct flow_table *ft,
     }
     pthread_mutex_unlock(&ft->locks[idx_exact]);
 
-    /* Update IP-only entry (no rotate here) */
+
     pthread_mutex_lock(&ft->locks[idx_ip]);
     entry = ft->buckets[idx_ip];
     while (entry) {
