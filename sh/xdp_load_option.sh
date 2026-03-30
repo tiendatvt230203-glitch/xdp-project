@@ -2,11 +2,21 @@
 
 set -euo pipefail
 
-DB_USER="sep"
-DB_NAME="xdpdb"
-DB_HOST="localhost"
 SQL_DIR="sql_options"
-export PGPASSWORD='ttEfyMW$)}\^>D<TF|T,Qq'
+if [ -f "/opt/db.env" ]; then
+  . "/opt/db.env"
+else
+  echo "[FATAL] Env file not found: /opt/db.env" >&2
+  exit 1
+fi
+
+: "${DB_HOST:?DB_HOST is required}"
+: "${DB_PORT:?DB_PORT is required}"
+: "${DB_USER:?DB_USER is required}"
+: "${DB_NAME:?DB_NAME is required}"
+: "${DB_PASS:?DB_PASS is required}"
+
+export PGPASSWORD="$DB_PASS"
 
 usage() {
   echo "Usage: $0 <config_id>"
@@ -32,12 +42,26 @@ fi
 ID_PADDED=$(printf "%02d" "${CONFIG_ID}")
 SQL_FILE_GLOB="${SQL_DIR}/${ID_PADDED}_*.sql"
 
-SQL_FILE=$(ls ${SQL_FILE_GLOB} 2>/dev/null || true)
+shopt -s nullglob
+SQL_FILES=( ${SQL_FILE_GLOB} )
+shopt -u nullglob
 
-if [ -z "${SQL_FILE}" ]; then
-  echo "Không tìm thấy file SQL cho ID=${CONFIG_ID} trong folder ${SQL_DIR}"
-  echo "Đã thử pattern: ${SQL_FILE_GLOB}"
+if [ "${#SQL_FILES[@]}" -eq 0 ]; then
+  echo "Could not find SQL file(s) for config_id=${CONFIG_ID} in folder ${SQL_DIR}" >&2
+  echo "Tried pattern: ${SQL_FILE_GLOB}" >&2
   exit 1
+fi
+
+# If there are multiple variants (repo may contain >1 file for the same ID),
+# pick the first one deterministically after sorting.
+IFS=$'\n' SQL_FILES_SORTED=($(printf '%s\n' "${SQL_FILES[@]}" | sort))
+unset IFS
+SQL_FILE="${SQL_FILES_SORTED[0]}"
+
+if [ "${#SQL_FILES_SORTED[@]}" -gt 1 ]; then
+  echo "[WARN] Multiple SQL files matched config_id=${CONFIG_ID}:" >&2
+  echo "       Using: ${SQL_FILE}" >&2
+  echo "       Matches: ${SQL_FILES_SORTED[*]}" >&2
 fi
 
 echo "=== XDP LOAD OPTION ==="
@@ -49,10 +73,10 @@ echo "SQL file:  ${SQL_FILE}"
 echo
 
 echo "[1/3] Import SQL for config_id=${CONFIG_ID}"
-psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -f "${SQL_FILE}"
+psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -f "${SQL_FILE}"
 
 echo "[2/3] Materialize profile/policy tables (profile-based dispatch)"
-psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" <<SQL
+psql -v ON_ERROR_STOP=1 -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" <<SQL
 BEGIN;
 
 DO \$\$
@@ -147,7 +171,7 @@ COMMIT;
 SQL
 
 echo "[3/3] Notify daemon to use config_id=${CONFIG_ID}"
-psql -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT pg_notify('xdp_start', '${CONFIG_ID}');"
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT pg_notify('xdp_start', '${CONFIG_ID}');"
 
 echo
 echo "Đã load option ID=${CONFIG_ID}, materialize profile/policy, và gửi NOTIFY. Kiểm tra log của daemon để xác nhận."

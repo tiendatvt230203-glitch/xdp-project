@@ -2,12 +2,22 @@
 
 set -euo pipefail
 
-DB_USER="sep"
-DB_NAME="xdpdb"
-DB_HOST="localhost"
 SQL_DIR="sql_options"
 
-export PGPASSWORD='ttEfyMW$)}\^>D<TF|T,Qq'
+if [ -f "/opt/db.env" ]; then
+  . "/opt/db.env"
+else
+  echo "[FATAL] Env file not found: /opt/db.env" >&2
+  exit 1
+fi
+
+: "${DB_HOST:?DB_HOST is required}"
+: "${DB_PORT:?DB_PORT is required}"
+: "${DB_USER:?DB_USER is required}"
+: "${DB_NAME:?DB_NAME is required}"
+: "${DB_PASS:?DB_PASS is required}"
+
+export PGPASSWORD="$DB_PASS"
 
 echo "=== XDP LOAD ALL OPTIONS ==="
 echo "DB user: ${DB_USER}"
@@ -32,7 +42,7 @@ fi
 
 for sql_file in "${SQL_FILES[@]}"; do
   echo ">>> Import ${sql_file}"
-  psql -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -f "${sql_file}"
+  psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -f "${sql_file}"
 done
 
 echo
