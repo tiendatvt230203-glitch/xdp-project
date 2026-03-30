@@ -26,9 +26,8 @@ static void usage(const char *prog) {
             "The backend must persist config for <ID> in PostgreSQL first.\n"
             "This process only verifies the row exists and sends pg_notify.\n"
             "\n"
-            "Env (defaults if unset):\n"
-            "  DB_HOST=localhost DB_PORT=5432 DB_NAME=xdpdb DB_USER=sep\n"
-            "Required: DB_PASS or PGPASSWORD (or /opt/db.env)\n",
+            "Env: DB_* is read from the environment (optionally via /opt/db.env).\n"
+            "Required: DB_PASS or PGPASSWORD (or /opt/db.env).\n",
             prog, NOTIFY_CHANNEL, prog);
 }
 
@@ -86,12 +85,6 @@ static int libbpf_print_silent(enum libbpf_print_level level,
     return 0;
 }
 
-static void setenv_default(const char *k, const char *v) {
-    if (!k || !v) return;
-    const char *cur = getenv(k);
-    if (!cur || !*cur) setenv(k, v, 0);
-}
-
 static const char *resolve_db_password(void) {
     const char *p = getenv("DB_PASS");
     if (p && *p) return p;
@@ -112,13 +105,7 @@ static int parse_config_id_arg(const char *s, int *out) {
 }
 
 int main(int argc, char **argv) {
-    if (!getenv("DB_HOST"))
-        load_env_from_file("/opt/db.env");
-
-    setenv_default("DB_HOST", "localhost");
-    setenv_default("DB_PORT", "5432");
-    setenv_default("DB_NAME", "xdpdb");
-    setenv_default("DB_USER", "sep");
+    load_env_from_file("/opt/db.env");
 
     const char *db_pass = resolve_db_password();
     const char *keywords[] = {"host", "port", "dbname", "user", "password", "connect_timeout", NULL};
@@ -142,11 +129,9 @@ int main(int argc, char **argv) {
     }
 
     if (config_id >= 0) {
-        if (!getenv("DB_HOST") || !getenv("DB_PORT") || !getenv("DB_NAME") || !getenv("DB_USER") ||
-            !db_pass || !*db_pass) {
+        if (!db_pass || !*db_pass) {
             fprintf(stderr,
-                    "[FATAL] Missing DB credentials. Set DB_HOST/DB_PORT/DB_NAME/DB_USER and DB_PASS or PGPASSWORD "
-                    "(or provide /opt/db.env)\n");
+                    "[FATAL] Missing DB credentials. Set DB_PASS or PGPASSWORD (or provide /opt/db.env).\n");
             return 1;
         }
 
