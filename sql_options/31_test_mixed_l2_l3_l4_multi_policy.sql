@@ -23,14 +23,9 @@ INSERT INTO xdp_configs (
 (31, 1, '2b7e151628aed2a6abf7158809cf4f3c', 3, 99, 'ctr', 128, 16);
 
 
-INSERT INTO xdp_local_configs (
-    config_id,
-    ifname,
-    network,
-    ingress_mbps
-) VALUES
-(31, 'enp7s0', '192.168.9.0/24', 10000),
-(31, 'eno2', '192.168.10.0/24', 5000);
+INSERT INTO xdp_local_configs (config_id, ifname, network) VALUES
+(31, 'enp7s0', '192.168.9.0/24'),
+(31, 'eno2', '192.168.10.0/24');
 
 INSERT INTO xdp_wan_configs (config_id, ifname, dst_ip) VALUES
 (31, 'enp4s0', '192.168.11.2/24'),
