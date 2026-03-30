@@ -26,20 +26,16 @@ INSERT INTO xdp_configs (
 INSERT INTO xdp_local_configs (
     config_id,
     ifname,
-    network
+    network,
+    ingress_mbps
 ) VALUES
-(31, 'enp7s0', '192.168.9.0/24'),
-(31, 'eno2', '192.168.10.0/24');
+(31, 'enp7s0', '192.168.9.0/24', 10000),
+(31, 'eno2', '192.168.10.0/24', 5000);
 
-INSERT INTO xdp_wan_configs (
-    config_id,
-    ifname,
-    dst_ip,
-    window_size_kb
-) VALUES
-(31, 'enp4s0', '192.168.11.2/24',  100),
-(31, 'enp5s0', '192.168.131.2/24', 100),
-(31, 'enp6s0', '192.168.203.2/24', 100);
+INSERT INTO xdp_wan_configs (config_id, ifname, dst_ip) VALUES
+(31, 'enp4s0', '192.168.11.2/24'),
+(31, 'enp5s0', '192.168.131.2/24'),
+(31, 'enp6s0', '192.168.203.2/24');
 
 INSERT INTO xdp_profiles (
     config_id,
@@ -48,8 +44,8 @@ INSERT INTO xdp_profiles (
     channel_bonding,
     description
 ) VALUES
-(31, 'profile_9_to_182',  1, 1, '192.168.9.2 <-> 192.168.182.2 via WAN1+WAN2'),
-(31, 'profile_10_to_180', 1, 1, '192.168.10.2 <-> 192.168.180.2 via WAN2+WAN3');
+(31, 'profile_9_to_182',  1, 1, '192.168.9.2 <-> 192.168.182.2 WAN1=enp4s0 WAN2=enp5s0'),
+(31, 'profile_10_to_180', 1, 1, '192.168.10.2 <-> 192.168.180.2 enp6s0');
 
 
 INSERT INTO xdp_profile_locals (profile_id, ifname)
@@ -63,15 +59,14 @@ ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 
 
-INSERT INTO xdp_profile_wans (profile_id, ifname)
-SELECT p.id, w.ifname
+INSERT INTO xdp_profile_wans (profile_id, ifname, bandwidth_weight_percent)
+SELECT p.id, w.ifname, w.weight
 FROM xdp_profiles p
 JOIN (VALUES
-    ('profile_9_to_182',  'enp4s0'),
-    ('profile_9_to_182',  'enp5s0'),
-    ('profile_10_to_180', 'enp5s0'),
-    ('profile_10_to_180', 'enp6s0')
-) AS w(profile_name, ifname)
+    ('profile_9_to_182',  'enp4s0', 75),
+    ('profile_9_to_182',  'enp5s0', 25),
+    ('profile_10_to_180', 'enp6s0', 100)
+) AS w(profile_name, ifname, weight)
 ON w.profile_name = p.profile_name
 WHERE p.config_id = 31;
 

@@ -29,6 +29,17 @@ static uint32_t flow_hash_ips(uint32_t src_ip, uint32_t dst_ip) {
     return hash % FLOW_TABLE_SIZE;
 }
 
+static uint32_t flow_mix_5tuple(uint32_t src_ip, uint32_t dst_ip,
+                                 uint16_t src_port, uint16_t dst_port, uint8_t protocol) {
+    uint32_t h = src_ip ^ dst_ip ^ ((uint32_t)src_port << 16) ^ (uint32_t)dst_port ^ (uint32_t)protocol;
+    h ^= h >> 16;
+    h *= 0x7feb352dU;
+    h ^= h >> 15;
+    h *= 0x846ca68bU;
+    h ^= h >> 16;
+    return h;
+}
+
 static uint64_t get_time_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -132,9 +143,11 @@ int flow_table_get_wan(struct flow_table *ft,
     entry->key.protocol = protocol;
     entry->byte_count = pkt_len;
     entry->current_wan = get_next_wan(ft->wan_count);
+    entry->wrr_slot = 0;
     entry->last_seen = now;
     entry->valid = 1;
     entry->ip_only_key = 0;
+    entry->profile_wan_pool = 0;
     entry->next = ft->buckets[idx];
     ft->buckets[idx] = entry;
 
@@ -151,20 +164,46 @@ static int wan_allowed_pos(int wan_idx, const int *allowed_wans, int allowed_cou
     return -1;
 }
 
+static int weights_sum_positive(const int *allowed_weights, int allowed_count) {
+    if (!allowed_weights || allowed_count <= 0)
+        return 0;
+    int s = 0;
+    for (int i = 0; i < allowed_count; i++) {
+        if (allowed_weights[i] > 0)
+            s += allowed_weights[i];
+    }
+    return s;
+}
+
+static int wrr_slot_to_wan(int slot, const int *allowed_wans, const int *allowed_weights,
+                           int allowed_count, int sumw) {
+    if (!allowed_wans || !allowed_weights || allowed_count <= 0 || sumw <= 0)
+        return allowed_wans ? allowed_wans[0] : 0;
+    int s = ((slot % sumw) + sumw) % sumw;
+    int acc = 0;
+    for (int i = 0; i < allowed_count; i++) {
+        int w = allowed_weights[i];
+        if (w <= 0)
+            continue;
+        acc += w;
+        if (s < acc)
+            return allowed_wans[i];
+    }
+    return allowed_wans[allowed_count - 1];
+}
+
 int flow_table_get_wan_profile(struct flow_table *ft,
                                 uint32_t src_ip, uint32_t dst_ip,
                                 uint16_t src_port, uint16_t dst_port,
                                 uint8_t protocol, uint32_t pkt_len,
-                                const int *allowed_wans, int allowed_count) {
+                                const int *allowed_wans, int allowed_count,
+                                const int *allowed_weights) {
     if (!ft || !allowed_wans || allowed_count <= 0)
         return flow_table_get_wan(ft, src_ip, dst_ip, src_port, dst_port, protocol, pkt_len);
     if (allowed_count == 1)
         return allowed_wans[0];
 
-    (void)src_port;
-    (void)dst_port;
-    (void)protocol;
-    uint32_t idx = flow_hash_ips(src_ip, dst_ip);
+    uint32_t idx = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
     uint64_t now = get_time_sec();
 
     pthread_mutex_lock(&ft->locks[idx]);
@@ -172,15 +211,18 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     struct flow_entry *entry = ft->buckets[idx];
 
     while (entry) {
-        if (entry->ip_only_key &&
+        if (!entry->ip_only_key && entry->profile_wan_pool &&
             entry->key.src_ip == src_ip &&
-            entry->key.dst_ip == dst_ip) {
+            entry->key.dst_ip == dst_ip &&
+            entry->key.src_port == src_port &&
+            entry->key.dst_port == dst_port &&
+            entry->key.protocol == protocol) {
 
             int pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
             if (pos < 0) {
-
                 entry->current_wan = allowed_wans[0];
                 entry->byte_count = 0;
+                entry->wrr_slot = 0;
                 pos = 0;
             }
 
@@ -191,12 +233,18 @@ int flow_table_get_wan_profile(struct flow_table *ft,
             if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
                 cur_limit = ft->wan_window_sizes[entry->current_wan];
 
-
+            int sumw = weights_sum_positive(allowed_weights, allowed_count);
             if (cur_limit > 0 && entry->byte_count >= cur_limit) {
                 entry->byte_count = 0;
-                pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
-                if (pos < 0) pos = 0;
-                entry->current_wan = allowed_wans[(pos + 1) % allowed_count];
+                if (sumw > 0 && allowed_weights) {
+                    entry->wrr_slot = (entry->wrr_slot + 1) % sumw;
+                    entry->current_wan = wrr_slot_to_wan(entry->wrr_slot, allowed_wans, allowed_weights,
+                                                         allowed_count, sumw);
+                } else {
+                    pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
+                    if (pos < 0) pos = 0;
+                    entry->current_wan = allowed_wans[(pos + 1) % allowed_count];
+                }
             }
 
             int wan_idx = entry->current_wan;
@@ -214,18 +262,28 @@ int flow_table_get_wan_profile(struct flow_table *ft,
 
     entry->key.src_ip = src_ip;
     entry->key.dst_ip = dst_ip;
-    entry->key.src_port = 0;
-    entry->key.dst_port = 0;
-    entry->key.protocol = 0;
+    entry->key.src_port = src_port;
+    entry->key.dst_port = dst_port;
+    entry->key.protocol = protocol;
     entry->byte_count = pkt_len;
     entry->last_seen = now;
     entry->valid = 1;
-    entry->ip_only_key = 1;
+    entry->ip_only_key = 0;
+    entry->profile_wan_pool = 1;
     entry->next = ft->buckets[idx];
 
-    int pick = get_next_wan(allowed_count);
-    if (pick < 0) pick = 0;
-    entry->current_wan = allowed_wans[pick % allowed_count];
+    int sumw = weights_sum_positive(allowed_weights, allowed_count);
+    if (sumw > 0 && allowed_weights) {
+        uint32_t h = flow_mix_5tuple(src_ip, dst_ip, src_port, dst_port, protocol);
+        entry->wrr_slot = (int)(h % (uint32_t)sumw);
+        entry->current_wan = wrr_slot_to_wan(entry->wrr_slot, allowed_wans, allowed_weights,
+                                             allowed_count, sumw);
+    } else {
+        entry->wrr_slot = 0;
+        int pick = get_next_wan(allowed_count);
+        if (pick < 0) pick = 0;
+        entry->current_wan = allowed_wans[pick % allowed_count];
+    }
 
     ft->buckets[idx] = entry;
     int wan_idx = entry->current_wan;
@@ -259,13 +317,15 @@ void flow_table_add_bytes(struct flow_table *ft,
                     entry->key.protocol == protocol) {
                     entry->byte_count += extra_bytes;
 
-                    uint32_t cur_limit = 0;
-                    if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
-                        cur_limit = ft->wan_window_sizes[entry->current_wan];
+                    if (!entry->profile_wan_pool) {
+                        uint32_t cur_limit = 0;
+                        if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
+                            cur_limit = ft->wan_window_sizes[entry->current_wan];
 
-                    if (cur_limit > 0 && entry->byte_count >= cur_limit) {
-                        entry->byte_count = 0;
-                        entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
+                        if (cur_limit > 0 && entry->byte_count >= cur_limit) {
+                            entry->byte_count = 0;
+                            entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
+                        }
                     }
                     break;
                 }
@@ -289,13 +349,15 @@ void flow_table_add_bytes(struct flow_table *ft,
 
             entry->byte_count += extra_bytes;
 
-            uint32_t cur_limit = 0;
-            if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
-                cur_limit = ft->wan_window_sizes[entry->current_wan];
+            if (!entry->profile_wan_pool) {
+                uint32_t cur_limit = 0;
+                if (entry->current_wan >= 0 && entry->current_wan < ft->wan_count)
+                    cur_limit = ft->wan_window_sizes[entry->current_wan];
 
-            if (cur_limit > 0 && entry->byte_count >= cur_limit) {
-                entry->byte_count = 0;
-                entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
+                if (cur_limit > 0 && entry->byte_count >= cur_limit) {
+                    entry->byte_count = 0;
+                    entry->current_wan = (entry->current_wan + 1) % ft->wan_count;
+                }
             }
             break;
         }

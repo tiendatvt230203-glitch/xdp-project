@@ -20,10 +20,12 @@ struct flow_entry {
     struct flow_key key;
     uint32_t byte_count;
     int current_wan;
+    int wrr_slot;
     uint64_t last_seen;
     int valid;
 
     uint8_t ip_only_key;
+    uint8_t profile_wan_pool;
     struct flow_entry *next;
 };
 
@@ -47,7 +49,8 @@ int flow_table_get_wan_profile(struct flow_table *ft,
                                 uint32_t src_ip, uint32_t dst_ip,
                                 uint16_t src_port, uint16_t dst_port,
                                 uint8_t protocol, uint32_t pkt_len,
-                                const int *allowed_wans, int allowed_count);
+                                const int *allowed_wans, int allowed_count,
+                                const int *allowed_weights);
 
 void flow_table_gc(struct flow_table *ft);
 

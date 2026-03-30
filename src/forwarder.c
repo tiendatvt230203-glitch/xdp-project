@@ -53,27 +53,43 @@ static int select_wan_idx_for_packet(struct forwarder *fwd,
                                      uint16_t src_port, uint16_t dst_port,
                                      uint8_t protocol, uint32_t pkt_len) {
 
-    (void)pkt_len;
-
     if (fwd && fwd->cfg && fwd->cfg->profile_count > 0) {
         int profile_idx = config_select_profile_for_flow(fwd->cfg, src_ip, dst_ip);
         if (profile_idx >= 0 && profile_idx < fwd->cfg->profile_count) {
             struct profile_config *p = &fwd->cfg->profiles[profile_idx];
             if (p->wan_count > 1) {
                 int allowed[MAX_INTERFACES];
-                int allowed_count = 0;
-                for (int i = 0; i < p->wan_count && i < MAX_INTERFACES; i++) {
+                int weights[MAX_INTERFACES];
+                int n = 0;
+                int any_weight = 0;
+                for (int i = 0; i < p->wan_count; i++) {
+                    if (p->wan_bandwidth_weight[i] > 0)
+                        any_weight = 1;
+                }
+                for (int i = 0; i < p->wan_count && n < MAX_INTERFACES; i++) {
                     int wi = p->wan_indices[i];
-                    if (wi >= 0 && wi < fwd->cfg->wan_count)
-                        allowed[allowed_count++] = wi;
+                    if (wi < 0 || wi >= fwd->cfg->wan_count)
+                        continue;
+                    if (any_weight && p->wan_bandwidth_weight[i] <= 0)
+                        continue;
+                    allowed[n] = wi;
+                    weights[n] = p->wan_bandwidth_weight[i];
+                    n++;
                 }
-                if (allowed_count > 1) {
+                if (n == 1)
+                    return allowed[0];
+                if (n > 1) {
+                    const int *wp = any_weight ? weights : NULL;
                     return flow_table_get_wan_profile(&g_flow_table,
-                                                       src_ip, dst_ip,
-                                                       src_port, dst_port,
-                                                       protocol, pkt_len,
-                                                       allowed, allowed_count);
+                                                      src_ip, dst_ip,
+                                                      src_port, dst_port,
+                                                      protocol, pkt_len,
+                                                      allowed, n, wp);
                 }
+            } else if (p->wan_count == 1) {
+                int wi = p->wan_indices[0];
+                if (wi >= 0 && wi < fwd->cfg->wan_count)
+                    return wi;
             }
         }
     }

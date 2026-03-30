@@ -13,19 +13,23 @@ CREATE TABLE IF NOT EXISTS xdp_local_configs (
     id SERIAL PRIMARY KEY,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL,
-    network TEXT
+    network TEXT,
+    ingress_mbps INT DEFAULT 0
 );
+
+ALTER TABLE xdp_local_configs ADD COLUMN IF NOT EXISTS ingress_mbps INT DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     id SERIAL PRIMARY KEY,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL,
-    dst_ip VARCHAR(32) DEFAULT '',
-    window_size_kb INT DEFAULT 8192
+    dst_ip VARCHAR(32) DEFAULT ''
 );
 
 
 ALTER TABLE xdp_wan_configs ADD COLUMN IF NOT EXISTS dst_ip VARCHAR(32) DEFAULT '';
+
+ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS window_size_kb;
 
 ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS src_ip;
 ALTER TABLE xdp_wan_configs DROP COLUMN IF EXISTS next_hop_ip;
@@ -61,6 +65,8 @@ CREATE TABLE IF NOT EXISTS xdp_profile_wans (
     profile_id INT NOT NULL REFERENCES xdp_profiles(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL
 );
+
+ALTER TABLE xdp_profile_wans ADD COLUMN IF NOT EXISTS bandwidth_weight_percent INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS xdp_profile_traffic_rules (
     id SERIAL PRIMARY KEY,

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <libpq-fe.h>
 int parse_mac(const char *str, uint8_t *mac) {
@@ -125,6 +126,37 @@ int config_validate(struct app_config *cfg) {
         }
     }
 
+    if (cfg->profile_count > 0 && cfg->wan_count > 0) {
+        int wan_owner[MAX_INTERFACES];
+        for (int i = 0; i < cfg->wan_count; i++)
+            wan_owner[i] = -1;
+
+        for (int pi = 0; pi < cfg->profile_count; pi++) {
+            struct profile_config *p = &cfg->profiles[pi];
+            for (int wi = 0; wi < p->wan_count; wi++) {
+                int idx = p->wan_indices[wi];
+                if (idx < 0 || idx >= cfg->wan_count)
+                    continue;
+                if (wan_owner[idx] >= 0) {
+                    if (wan_owner[idx] != pi) {
+                        fprintf(stderr,
+                                "[CONFIG] WAN \"%s\" is used by both profile \"%s\" and \"%s\"; "
+                                "each WAN must belong to exactly one profile.\n",
+                                cfg->wans[idx].ifname,
+                                cfg->profiles[wan_owner[idx]].name,
+                                p->name);
+                        return -1;
+                    }
+                    fprintf(stderr,
+                            "[CONFIG] WAN \"%s\" is listed more than once in profile \"%s\".\n",
+                            cfg->wans[idx].ifname, p->name);
+                    return -1;
+                }
+                wan_owner[idx] = pi;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -194,8 +226,38 @@ int config_select_wan_for_profile(struct app_config *cfg, int profile_idx,
         return -1;
 
     uint32_t h = flow_hash_u32(src_ip, dst_ip, src_port, dst_port, protocol);
-    int local_wan_slot = (int)(h % (uint32_t)p->wan_count);
-    int wan_idx = p->wan_indices[local_wan_slot];
+
+    int sumw = 0;
+    for (int i = 0; i < p->wan_count; i++) {
+        int w = p->wan_bandwidth_weight[i];
+        if (w > 0)
+            sumw += w;
+    }
+
+    if (sumw <= 0) {
+        int slot = (int)(h % (uint32_t)p->wan_count);
+        int wan_idx = p->wan_indices[slot];
+        if (wan_idx < 0 || wan_idx >= cfg->wan_count)
+            return -1;
+        return wan_idx;
+    }
+
+    uint32_t r = h % (uint32_t)sumw;
+    int acc = 0;
+    for (int i = 0; i < p->wan_count; i++) {
+        int w = p->wan_bandwidth_weight[i];
+        if (w <= 0)
+            continue;
+        acc += w;
+        if (r < (uint32_t)acc) {
+            int wan_idx = p->wan_indices[i];
+            if (wan_idx < 0 || wan_idx >= cfg->wan_count)
+                return -1;
+            return wan_idx;
+        }
+    }
+
+    int wan_idx = p->wan_indices[p->wan_count - 1];
     if (wan_idx < 0 || wan_idx >= cfg->wan_count)
         return -1;
     return wan_idx;
@@ -251,6 +313,45 @@ int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t
 
 int parse_hex_bytes_pub(const char *str, uint8_t *out, int expected_len) {
     return parse_hex_bytes(str, out, expected_len);
+}
+
+uint32_t config_profile_aggregate_ingress_mbps(const struct app_config *cfg, int profile_idx) {
+    if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count)
+        return 0;
+    return cfg->profiles[profile_idx].aggregate_ingress_mbps;
+}
+
+uint32_t config_profile_wan_target_mbps(const struct app_config *cfg, int profile_idx, int wan_slot) {
+    if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count)
+        return 0;
+    const struct profile_config *p = &cfg->profiles[profile_idx];
+    if (wan_slot < 0 || wan_slot >= p->wan_count)
+        return 0;
+    uint32_t agg = p->aggregate_ingress_mbps;
+    if (agg == 0)
+        return 0;
+
+    int sumw = 0;
+    for (int i = 0; i < p->wan_count; i++) {
+        int w = p->wan_bandwidth_weight[i];
+        if (w > 0)
+            sumw += w;
+    }
+
+    if (sumw > 0) {
+        int w = p->wan_bandwidth_weight[wan_slot];
+        if (w <= 0)
+            return 0;
+        return (uint32_t)((uint64_t)agg * (uint64_t)w / (uint64_t)sumw);
+    }
+
+    if (p->wan_count <= 0)
+        return 0;
+    uint32_t base = agg / (uint32_t)p->wan_count;
+    uint32_t rem = agg % (uint32_t)p->wan_count;
+    if (wan_slot < (int)rem)
+        return base + 1;
+    return base;
 }
 
 

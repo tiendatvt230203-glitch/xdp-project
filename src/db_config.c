@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <libpq-fe.h>
 #include <strings.h>
@@ -119,6 +120,19 @@ static int find_wan_index_by_ifname(const struct app_config *cfg, const char *if
     return -1;
 }
 
+static void recompute_profile_ingress_aggregates(struct app_config *cfg) {
+    for (int pi = 0; pi < cfg->profile_count; pi++) {
+        struct profile_config *p = &cfg->profiles[pi];
+        uint64_t sum = 0;
+        for (int li = 0; li < p->local_count; li++) {
+            int idx = p->local_indices[li];
+            if (idx >= 0 && idx < cfg->local_count)
+                sum += (uint64_t)cfg->locals[idx].ingress_mbps;
+        }
+        p->aggregate_ingress_mbps = (sum > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)sum;
+    }
+}
+
 static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int config_id) {
     char id_str[32];
     snprintf(id_str, sizeof(id_str), "%d", config_id);
@@ -169,14 +183,22 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         PQclear(res);
 
         res = PQexecParams(conn,
-            "SELECT ifname FROM xdp_profile_wans WHERE profile_id = $1 ORDER BY id",
+            "SELECT ifname, bandwidth_weight_percent FROM xdp_profile_wans WHERE profile_id = $1 ORDER BY id",
             1, NULL, pp, NULL, NULL, 0);
         if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+            int wcol = PQfnumber(res, "bandwidth_weight_percent");
             int rows = PQntuples(res);
             for (int r = 0; r < rows && p->wan_count < MAX_PROFILE_INTERFACES; r++) {
                 const char *ifname = PQgetvalue(res, r, 0);
                 int wi = find_wan_index_by_ifname(cfg, ifname);
-                if (wi >= 0) p->wan_indices[p->wan_count++] = wi;
+                if (wi >= 0) {
+                    p->wan_indices[p->wan_count] = wi;
+                    if (wcol >= 0)
+                        p->wan_bandwidth_weight[p->wan_count] = atoi(PQgetvalue(res, r, wcol));
+                    else
+                        p->wan_bandwidth_weight[p->wan_count] = 0;
+                    p->wan_count++;
+                }
             }
         }
         PQclear(res);
@@ -271,6 +293,8 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         }
         PQclear(res);
     }
+
+    recompute_profile_ingress_aggregates(cfg);
     return 0;
 }
 
@@ -358,6 +382,13 @@ static int load_local_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
+        int ing_col = PQfnumber(res, "ingress_mbps");
+        if (ing_col >= 0) {
+            v = PQgetvalue(res, row, ing_col);
+            if (v && v[0] != '\0')
+                loc->ingress_mbps = (uint32_t)strtoul(v, NULL, 10);
+        }
+
         cfg->local_count++;
     }
     return 0;
@@ -381,7 +412,7 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
 
         wan->frame_size   = cfg->global_frame_size;
         wan->batch_size   = cfg->global_batch_size;
-        wan->window_size  = (uint32_t)(DEFAULT_WINDOW_KB * 1024);
+        wan->window_size  = (uint32_t)(WAN_REORDER_WINDOW_KB * 1024U);
         wan->umem_mb      = DEFAULT_UMEM_MB_WAN;
         wan->ring_size    = DEFAULT_RING_SIZE_WAN;
         wan->queue_count  = DEFAULT_QUEUE_COUNT;
@@ -422,17 +453,6 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res)
             }
         }
 
-
-        int ws_col = PQfnumber(res, "window_size_kb");
-        if (ws_col >= 0) {
-            v = PQgetvalue(res, row, ws_col);
-            if (v && v[0] != '\0') {
-                int kb = atoi(v);
-                if (kb > 0) {
-                    wan->window_size = (uint32_t)kb * 1024U;
-                }
-            }
-        }
 
         cfg->wan_count++;
     }
@@ -567,9 +587,17 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     {
         const char *params[1] = { id_str };
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, network "
+            "SELECT ifname, network, ingress_mbps "
             "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
+
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            PQclear(res);
+            res = PQexecParams(conn,
+                "SELECT ifname, network "
+                "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+                1, NULL, params, NULL, NULL, 0);
+        }
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             fprintf(stderr, "[DB] Query xdp_local_configs failed: %s\n", PQerrorMessage(conn));
@@ -593,14 +621,14 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
         const char *params[1] = { id_str };
 
         PGresult *res = PQexecParams(conn,
-            "SELECT ifname, dst_ip, window_size_kb "
+            "SELECT ifname, dst_ip "
             "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             PQclear(res);
             res = PQexecParams(conn,
-                "SELECT ifname, dst_ip, src_mac, dst_mac, window_size_kb "
+                "SELECT ifname, dst_ip, src_mac, dst_mac "
                 "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
                 1, NULL, params, NULL, NULL, 0);
         }
