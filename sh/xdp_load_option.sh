@@ -95,7 +95,7 @@ BEGIN
         -- keep existing profile/policy rows
     ELSE
         -- Rebuild profiles for this config_id from the legacy tables:
-        -- xdp_configs, xdp_local_configs, xdp_wan_configs, xdp_redirect_rules.
+        -- xdp_local_configs, xdp_wan_configs, xdp_redirect_rules.
         DELETE FROM xdp_profiles WHERE config_id = ${CONFIG_ID};
 
         INSERT INTO xdp_profiles (
@@ -122,47 +122,6 @@ BEGIN
         SELECT p.id, r.src_cidr, r.dst_cidr
         FROM xdp_profiles p
         JOIN xdp_redirect_rules r ON r.config_id = p.config_id
-        WHERE p.config_id = ${CONFIG_ID};
-
-        -- One policy that matches all traffic in the profile.
-        -- The policy action is derived from xdp_configs.encrypt_layer.
-        INSERT INTO xdp_profile_crypto_policies (
-          id,
-          profile_id,
-          priority,
-          action,
-          protocol,
-          src_cidr,
-          src_port,
-          dst_cidr,
-          dst_port,
-          crypto_mode,
-          aes_bits,
-          nonce_size,
-          crypto_key
-        )
-        SELECT
-          -- Deterministic PK per config_id (unique globally).
-          (100 + 256 * ${CONFIG_ID}),
-          p.id,
-          100,
-          CASE
-            WHEN c.encrypt_layer = 2 THEN 'encrypt_l2'
-            WHEN c.encrypt_layer = 3 THEN 'encrypt_l3'
-            WHEN c.encrypt_layer = 4 THEN 'encrypt_l4'
-            ELSE 'bypass'
-          END,
-          'Any',
-          'Any',
-          'Any',
-          'Any',
-          'Any',
-          c.crypto_mode,
-          c.aes_bits,
-          c.nonce_size,
-          c.crypto_key
-        FROM xdp_profiles p
-        JOIN xdp_configs c ON c.id = p.config_id
         WHERE p.config_id = ${CONFIG_ID};
     END IF;
 END \$\$;

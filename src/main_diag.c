@@ -206,7 +206,7 @@ static void log_wan_l2_resolution_plan(struct app_config *cfg) {
 void main_diag_log_loaded_config(struct app_config *cfg, int config_id) {
     fprintf(stderr,
             "[DB LOAD] config_id=%d crypto_enabled=%d encrypt_layer=%d "
-            "fake_protocol=%u (global xdp_configs only) "
+            "fake_protocol=%u (runtime default marker) "
             "crypto_mode=%d aes_bits=%d nonce_size=%d locals=%d wans=%d profiles=%d policies=%d\n",
             config_id,
             cfg->crypto_enabled,
@@ -219,6 +219,11 @@ void main_diag_log_loaded_config(struct app_config *cfg, int config_id) {
             cfg->wan_count,
             cfg->profile_count,
             cfg->policy_count);
+    if (cfg->policy_count > 0) {
+        fprintf(stderr,
+                "[DB LOAD] Note: policies>0 => effective encryption is driven by "
+                "xdp_profile_crypto_policies.action; xdp_configs only anchors config_id.\n");
+    }
     log_crypto_policies_human(cfg, config_id);
     log_wan_l2_resolution_plan(cfg);
 }

@@ -1,13 +1,15 @@
 CREATE TABLE IF NOT EXISTS xdp_configs (
-    id SERIAL PRIMARY KEY,
-    crypto_enabled INT DEFAULT 0,
-    crypto_key TEXT,
-    encrypt_layer INT DEFAULT 0,
-    fake_protocol INT DEFAULT 0,
-    crypto_mode TEXT DEFAULT 'ctr',
-    aes_bits INT DEFAULT 128,
-    nonce_size INT DEFAULT 12
+    id SERIAL PRIMARY KEY
 );
+
+-- Schema cleanup (legacy fields moved to xdp_profile_crypto_policies)
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS crypto_enabled;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS crypto_key;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS encrypt_layer;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS fake_protocol;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS crypto_mode;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS aes_bits;
+ALTER TABLE xdp_configs DROP COLUMN IF EXISTS nonce_size;
 
 CREATE TABLE IF NOT EXISTS xdp_local_configs (
     id SERIAL PRIMARY KEY,

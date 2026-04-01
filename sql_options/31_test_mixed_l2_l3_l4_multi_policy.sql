@@ -11,16 +11,9 @@ DELETE FROM xdp_configs       WHERE id = 31;
 
 
 INSERT INTO xdp_configs (
-    id,
-    crypto_enabled,
-    crypto_key,
-    encrypt_layer,
-    fake_protocol,
-    crypto_mode,
-    aes_bits,
-    nonce_size
+    id
 ) VALUES
-(31, 1, '2b7e151628aed2a6abf7158809cf4f3c', 3, 99, 'ctr', 128, 16);
+(31);
 
 
 INSERT INTO xdp_local_configs (config_id, ifname, network) VALUES
