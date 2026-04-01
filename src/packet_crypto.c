@@ -407,6 +407,44 @@ uint16_t crypto_calc_tcp_checksum(const uint8_t *ip_hdr, int ip_hdr_len,
     return (uint16_t)(~sum);
 }
 
+uint16_t crypto_calc_udp_checksum(const uint8_t *ip_hdr, int ip_hdr_len,
+                                  const uint8_t *udp_seg, int udp_seg_len) {
+    if (!ip_hdr || !udp_seg || ip_hdr_len < 20 || udp_seg_len < 8)
+        return 0;
+
+    uint32_t sum = 0;
+    /* IPv4 pseudo header */
+    sum += ((uint16_t)ip_hdr[12] << 8) | ip_hdr[13];
+    sum += ((uint16_t)ip_hdr[14] << 8) | ip_hdr[15];
+    sum += ((uint16_t)ip_hdr[16] << 8) | ip_hdr[17];
+    sum += ((uint16_t)ip_hdr[18] << 8) | ip_hdr[19];
+    sum += (uint16_t)17; /* UDP */
+    sum += (uint16_t)(udp_seg_len & 0xFFFF);
+
+    for (int i = 0; i < udp_seg_len; i += 2) {
+        uint16_t word;
+        if (i == 6 && i + 2 <= udp_seg_len) {
+            /* UDP checksum field treated as zero. */
+            word = 0;
+        } else {
+            word = ((uint16_t)udp_seg[i] << 8);
+            if (i + 1 < udp_seg_len)
+                word |= udp_seg[i + 1];
+            else
+                word |= 0;
+        }
+        sum += word;
+    }
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    uint16_t c = (uint16_t)(~sum);
+    /* In UDP/IPv4, checksum 0 means "no checksum"; if computed 0, send 0xFFFF. */
+    if (c == 0)
+        c = 0xFFFF;
+    return c;
+}
+
 void crypto_restore_ipv4_header(uint8_t *packet, size_t pkt_len) {
     (void)pkt_len;
     packet[12] = 0x08;

@@ -610,16 +610,10 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
     /*
      * Clean design: xdp_configs is an anchor/header only.
      * Runtime crypto is derived from xdp_profile_crypto_policies.
+     *
+     * Note: cfg was memset(0) at function start, so we only fill fields we
+     * actually derive from policies below.
      */
-    cfg->crypto_enabled = 0;
-    cfg->encrypt_layer = 0;
-    cfg->fake_protocol = 0;
-    cfg->fake_ethertype_ipv4 = 0;
-    cfg->fake_ethertype_ipv6 = 0;
-    cfg->crypto_mode = CRYPTO_MODE_CTR;
-    cfg->aes_bits = 128;
-    cfg->nonce_size = 12;
-    memset(cfg->crypto_key, 0, sizeof(cfg->crypto_key));
 
     if (cfg->policy_count > 0) {
         int has_l2 = 0, has_l3 = 0, has_l4 = 0;
@@ -644,6 +638,12 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
         cfg->crypto_enabled = (has_l2 || has_l3 || has_l4) ? 1 : 0;
 
+        if ((has_l2 + has_l3 + has_l4) > 1) {
+            fprintf(stderr,
+                    "[DB CRYPTO] Invalid policy set: encrypt_l2/encrypt_l3/encrypt_l4 are mutually exclusive per config_id\n");
+            return -1;
+        }
+
         /*
          * Runtime pipeline selection:
          * - pure L2 only => run L2
@@ -651,25 +651,35 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
          * - otherwise (mixed or any L3) => run L3 pipeline (supports L3/L4 auto decrypt)
          */
         if (cfg->crypto_enabled) {
-            if (has_l2 && !has_l3 && !has_l4) cfg->encrypt_layer = 2;
-            else if (has_l4 && !has_l2 && !has_l3) cfg->encrypt_layer = 4;
-            else cfg->encrypt_layer = 3;
+            if (has_l2) cfg->encrypt_layer = 2;
+            else if (has_l3) cfg->encrypt_layer = 3;
+            else if (has_l4) cfg->encrypt_layer = 4;
         }
 
-        if (first_key_pi >= 0) {
+        if (cfg->crypto_enabled) {
+            if (first_key_pi < 0) {
+                fprintf(stderr,
+                        "[DB CRYPTO] policies request encryption but no crypto_key was provided "
+                        "in xdp_profile_crypto_policies\n");
+                return -1;
+            }
             const struct crypto_policy *cp = &cfg->policies[first_key_pi];
             cfg->crypto_mode = cp->crypto_mode;
             cfg->aes_bits = (cp->aes_bits == 256) ? 256 : 128;
             cfg->nonce_size = (cp->nonce_size > 0) ? cp->nonce_size : 12;
             memcpy(cfg->crypto_key, cp->key, sizeof(cfg->crypto_key));
         }
-    }
 
-    if (cfg->crypto_enabled) {
-        /* Marker defaults used by L2/L3 when needed. */
-        cfg->fake_protocol = 99;
-        cfg->fake_ethertype_ipv4 = 0x88b5;
-        cfg->fake_ethertype_ipv6 = 0x88b6;
+        /* Markers are per-option and must not overlap. */
+        if (has_l3) {
+            if (cfg->fake_protocol == 0)
+                cfg->fake_protocol = 99;
+        } else if (has_l2) {
+            if (cfg->fake_ethertype_ipv4 == 0 && cfg->fake_ethertype_ipv6 == 0) {
+                cfg->fake_ethertype_ipv4 = 0x88b5;
+                cfg->fake_ethertype_ipv6 = 0x88b6;
+            }
+        }
     }
     return config_validate(cfg);
 }

@@ -10,7 +10,8 @@ void crypto_apply_default_from_cfg(const struct app_config *cfg) {
     packet_crypto_set_mode(cfg->crypto_mode);
     packet_crypto_set_aes_bits(cfg->aes_bits);
     packet_crypto_set_nonce_size(cfg->nonce_size);
-    packet_crypto_set_fake_protocol((uint8_t)(cfg->fake_protocol & 0xFF));
+    if (cfg->encrypt_layer == 3)
+        packet_crypto_set_fake_protocol((uint8_t)(cfg->fake_protocol & 0xFF));
     packet_crypto_set_policy_id(0);
 
     packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
@@ -32,10 +33,9 @@ void crypto_apply_from_policy(const struct crypto_policy *cp) {
     else if (cp->action == POLICY_ACTION_ENCRYPT_L4)
         packet_crypto_set_encrypt_layer(4);
 
-    if (cp->action == POLICY_ACTION_ENCRYPT_L3)
+    if (cp->action == POLICY_ACTION_ENCRYPT_L3) {
         packet_crypto_set_fake_protocol(99);
-    else
-        packet_crypto_set_fake_protocol((uint8_t)(cp->id & 0xFF));
+    }
     packet_crypto_set_policy_id((uint8_t)(cp->id & 0x7F));
 }
 

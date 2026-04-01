@@ -200,7 +200,9 @@ static int encrypt_packet(void *pkt_data, uint32_t *pkt_len) {
         packet_crypto_set_mode(g_cfg_ptr->crypto_mode);
         packet_crypto_set_aes_bits(g_cfg_ptr->aes_bits);
         packet_crypto_set_nonce_size(g_cfg_ptr->nonce_size);
-        packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
+        if (g_cfg_ptr->encrypt_layer == 3) {
+            packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
+        }
         packet_crypto_set_policy_id(0);
     }
 
@@ -219,7 +221,9 @@ static int decrypt_packet(void *pkt_data, uint32_t *pkt_len) {
         packet_crypto_set_mode(g_cfg_ptr->crypto_mode);
         packet_crypto_set_aes_bits(g_cfg_ptr->aes_bits);
         packet_crypto_set_nonce_size(g_cfg_ptr->nonce_size);
-        packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
+        if (g_cfg_ptr->encrypt_layer == 3) {
+            packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
+        }
         packet_crypto_set_policy_id(0);
     }
 
@@ -1361,6 +1365,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     crypto_enabled = cfg->crypto_enabled;
     crypto_layer = cfg->encrypt_layer;
     int has_encrypt_l2 = 0;
+    int has_encrypt_l3 = 0;
     if (crypto_enabled) {
         packet_crypto_set_aes_bits(cfg->aes_bits);
         if (packet_crypto_init(&crypto_ctx, cfg->crypto_key) != 0) {
@@ -1395,10 +1400,12 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
 
 
         for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            if (cfg->policies[pi].action == POLICY_ACTION_ENCRYPT_L2 && g_policy_crypto_ctx_ready[pi]) {
+            if (!g_policy_crypto_ctx_ready[pi])
+                continue;
+            if (cfg->policies[pi].action == POLICY_ACTION_ENCRYPT_L2)
                 has_encrypt_l2 = 1;
-                break;
-            }
+            else if (cfg->policies[pi].action == POLICY_ACTION_ENCRYPT_L3)
+                has_encrypt_l3 = 1;
         }
 
         packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
@@ -1412,7 +1419,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             }
             packet_crypto_set_ethertype(cfg->fake_ethertype_ipv4, cfg->fake_ethertype_ipv6);
         }
-        if (crypto_layer == 2 || crypto_layer == 3) {
+        if (crypto_layer == 3 || has_encrypt_l3) {
             if (cfg->fake_protocol != 0)
                 packet_crypto_set_fake_protocol(cfg->fake_protocol);
             else

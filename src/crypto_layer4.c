@@ -13,6 +13,8 @@
 #define TCP_SEQ_OFF   4
 #define TCP_FLAGS_OFF 13
 #define TCP_CKSUM_OFF 16
+#define UDP_LEN_OFF   4
+#define UDP_CKSUM_OFF 6
 
 static void l4_write_tunnel_header(uint8_t *buf, const uint8_t *nonce,
                                     int nonce_size) {
@@ -162,6 +164,18 @@ int crypto_layer4_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
         uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off, ip_hdr_len, tcp_seg, tcp_seg_len);
         tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
         tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+    } else if (ip_proto == 17) {
+        uint8_t *udp_seg = packet + transport_off;
+        int udp_seg_len = (int)(new_pkt_len - (size_t)transport_off);
+        /* Update UDP length (header+payload). */
+        udp_seg[UDP_LEN_OFF] = (uint8_t)((udp_seg_len >> 8) & 0xFF);
+        udp_seg[UDP_LEN_OFF + 1] = (uint8_t)(udp_seg_len & 0xFF);
+        /* Recompute UDP checksum (IPv4). */
+        udp_seg[UDP_CKSUM_OFF] = 0;
+        udp_seg[UDP_CKSUM_OFF + 1] = 0;
+        uint16_t udp_cksum = crypto_calc_udp_checksum(packet + l3_off, ip_hdr_len, udp_seg, udp_seg_len);
+        udp_seg[UDP_CKSUM_OFF] = (uint8_t)(udp_cksum >> 8);
+        udp_seg[UDP_CKSUM_OFF + 1] = (uint8_t)(udp_cksum & 0xFF);
     }
 
     return (int)new_pkt_len;
@@ -277,6 +291,16 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
             uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off, ip_hdr_len, tcp_seg, tcp_seg_len);
             tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
             tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+        } else if (ip_proto == 17) {
+            uint8_t *udp_seg = packet + transport_off;
+            int udp_seg_len = (int)(new_pkt_len - (size_t)transport_off);
+            udp_seg[UDP_LEN_OFF] = (uint8_t)((udp_seg_len >> 8) & 0xFF);
+            udp_seg[UDP_LEN_OFF + 1] = (uint8_t)(udp_seg_len & 0xFF);
+            udp_seg[UDP_CKSUM_OFF] = 0;
+            udp_seg[UDP_CKSUM_OFF + 1] = 0;
+            uint16_t udp_cksum = crypto_calc_udp_checksum(packet + l3_off, ip_hdr_len, udp_seg, udp_seg_len);
+            udp_seg[UDP_CKSUM_OFF] = (uint8_t)(udp_cksum >> 8);
+            udp_seg[UDP_CKSUM_OFF + 1] = (uint8_t)(udp_cksum & 0xFF);
         }
 
         return (int)new_pkt_len;
