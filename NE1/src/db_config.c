@@ -578,18 +578,24 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
-        PGresult *res = PQexecParams(conn,
-            "SELECT ifname, network, ingress_mbps "
-            "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
-            1, NULL, params, NULL, NULL, 0);
+        /* ingress_mbps is optional in some deployments (used for shaping/weighting). */
+        int has_ingress_mbps = 0;
+        PGresult *col_res = PQexec(conn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='xdp_local_configs' AND column_name='ingress_mbps' "
+            "LIMIT 1");
+        if (col_res && PQresultStatus(col_res) == PGRES_TUPLES_OK && PQntuples(col_res) > 0)
+            has_ingress_mbps = 1;
+        if (col_res)
+            PQclear(col_res);
 
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            PQclear(res);
-            res = PQexecParams(conn,
-                "SELECT ifname, network "
-                "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
-                1, NULL, params, NULL, NULL, 0);
-        }
+        PGresult *res = PQexecParams(conn,
+            has_ingress_mbps
+                ? "SELECT ifname, network, ingress_mbps "
+                  "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id"
+                : "SELECT ifname, network "
+                  "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+            1, NULL, params, NULL, NULL, 0);
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             fprintf(stderr, "[DB] Query xdp_local_configs failed: %s\n", PQerrorMessage(conn));
