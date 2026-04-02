@@ -70,9 +70,9 @@ static int select_wan_idx_for_packet(struct forwarder *fwd,
                     int wi = p->wan_indices[i];
                     if (wi < 0 || wi >= fwd->cfg->wan_count)
                         continue;
+                    allowed[n] = wi;
                     if (any_weight && p->wan_bandwidth_weight[i] <= 0)
                         continue;
-                    allowed[n] = wi;
                     weights[n] = p->wan_bandwidth_weight[i];
                     n++;
                 }

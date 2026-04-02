@@ -115,16 +115,9 @@ static void log_crypto_policies_human(struct app_config *cfg, int config_id) {
                 if (idx >= 0 && idx < cfg->local_count) {
                     const struct local_config *lc = &cfg->locals[idx];
                     fprintf(stderr, "%s%s", li ? ", " : "", lc->ifname);
-                    if (lc->ingress_mbps > 0)
-                        fprintf(stderr, " [ingress_mbps=%u]", (unsigned)lc->ingress_mbps);
                 }
             }
             fprintf(stderr, "\n");
-        }
-        if (p->aggregate_ingress_mbps > 0) {
-            fprintf(stderr,
-                    "    profile aggregate ingress: %u Mbps\n",
-                    (unsigned)p->aggregate_ingress_mbps);
         }
         if (p->wan_count > 0) {
             fprintf(stderr, "    interfaces wan:  ");
@@ -133,13 +126,10 @@ static void log_crypto_policies_human(struct app_config *cfg, int config_id) {
                 if (idx >= 0 && idx < cfg->wan_count) {
                     fprintf(stderr, "%s%s", wi ? ", " : "", cfg->wans[idx].ifname);
                     int bw = p->wan_bandwidth_weight[wi];
-                    uint32_t tgt = config_profile_wan_target_mbps(cfg, pr, wi);
                     if (bw > 0)
                         fprintf(stderr, " [weight=%d", bw);
                     else
                         fprintf(stderr, " [equal-share");
-                    if (p->aggregate_ingress_mbps > 0 && tgt > 0)
-                        fprintf(stderr, ", target_mbps=%u", (unsigned)tgt);
                     fprintf(stderr, "]");
                 }
             }

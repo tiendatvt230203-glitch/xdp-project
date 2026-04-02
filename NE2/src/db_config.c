@@ -120,19 +120,6 @@ static int find_wan_index_by_ifname(const struct app_config *cfg, const char *if
     return -1;
 }
 
-static void recompute_profile_ingress_aggregates(struct app_config *cfg) {
-    for (int pi = 0; pi < cfg->profile_count; pi++) {
-        struct profile_config *p = &cfg->profiles[pi];
-        uint64_t sum = 0;
-        for (int li = 0; li < p->local_count; li++) {
-            int idx = p->local_indices[li];
-            if (idx >= 0 && idx < cfg->local_count)
-                sum += (uint64_t)cfg->locals[idx].ingress_mbps;
-        }
-        p->aggregate_ingress_mbps = (sum > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)sum;
-    }
-}
-
 static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int config_id) {
     char id_str[32];
     snprintf(id_str, sizeof(id_str), "%d", config_id);
@@ -294,7 +281,6 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         PQclear(res);
     }
 
-    recompute_profile_ingress_aggregates(cfg);
     return 0;
 }
 
@@ -380,13 +366,6 @@ static int load_local_rows(struct app_config *cfg, PGresult *res)
                 fprintf(stderr, "[DB LOCAL] Invalid network CIDR: %s\n", v);
                 return -1;
             }
-        }
-
-        int ing_col = PQfnumber(res, "ingress_mbps");
-        if (ing_col >= 0) {
-            v = PQgetvalue(res, row, ing_col);
-            if (v && v[0] != '\0')
-                loc->ingress_mbps = (uint32_t)strtoul(v, NULL, 10);
         }
 
         cfg->local_count++;
@@ -579,24 +558,18 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     {
         const char *params[1] = { id_str };
-        /* ingress_mbps is optional in some deployments (used for shaping/weighting). */
-        int has_ingress_mbps = 0;
-        PGresult *col_res = PQexec(conn,
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name='xdp_local_configs' AND column_name='ingress_mbps' "
-            "LIMIT 1");
-        if (col_res && PQresultStatus(col_res) == PGRES_TUPLES_OK && PQntuples(col_res) > 0)
-            has_ingress_mbps = 1;
-        if (col_res)
-            PQclear(col_res);
-
         PGresult *res = PQexecParams(conn,
-            has_ingress_mbps
-                ? "SELECT ifname, network, ingress_mbps "
-                  "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id"
-                : "SELECT ifname, network "
-                  "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+            "SELECT ifname, network "
+            "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
             1, NULL, params, NULL, NULL, 0);
+
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            PQclear(res);
+            res = PQexecParams(conn,
+                "SELECT ifname, network "
+                "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+                1, NULL, params, NULL, NULL, 0);
+        }
 
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             fprintf(stderr, "[DB] Query xdp_local_configs failed: %s\n", PQerrorMessage(conn));

@@ -15,11 +15,11 @@ CREATE TABLE IF NOT EXISTS xdp_local_configs (
     id SERIAL PRIMARY KEY,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
     ifname VARCHAR(32) NOT NULL,
-    network TEXT,
-    ingress_mbps INT DEFAULT 0
+    network TEXT
 );
 
-ALTER TABLE xdp_local_configs ADD COLUMN IF NOT EXISTS ingress_mbps INT DEFAULT 0;
+ALTER TABLE xdp_local_configs DROP COLUMN IF EXISTS ingress_mbps;
+
 
 CREATE TABLE IF NOT EXISTS xdp_wan_configs (
     id SERIAL PRIMARY KEY,

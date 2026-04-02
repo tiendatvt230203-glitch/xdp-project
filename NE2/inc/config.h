@@ -77,7 +77,6 @@ struct profile_config {
     int wan_indices[MAX_PROFILE_INTERFACES];
     int wan_bandwidth_weight[MAX_PROFILE_INTERFACES];
     int wan_count;
-    uint32_t aggregate_ingress_mbps;
     struct profile_traffic_rule traffic_rules[MAX_PROFILE_TRAFFIC_RULES];
     int traffic_rule_count;
     int policy_indices[MAX_CRYPTO_POLICIES];
@@ -96,7 +95,6 @@ struct local_config {
     uint32_t batch_size;
     uint32_t frame_size;
     int queue_count;
-    uint32_t ingress_mbps;
 };
 
 struct wan_config {
@@ -169,8 +167,5 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
                                                         uint32_t src_ip, uint32_t dst_ip,
                                                         uint16_t src_port, uint16_t dst_port,
                                                         uint8_t protocol);
-
-uint32_t config_profile_aggregate_ingress_mbps(const struct app_config *cfg, int profile_idx);
-uint32_t config_profile_wan_target_mbps(const struct app_config *cfg, int profile_idx, int wan_slot);
 
 #endif
