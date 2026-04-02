@@ -114,4 +114,7 @@ uint16_t crypto_calc_ip_checksum(const uint8_t *ip_hdr, int hdr_len);
 uint16_t crypto_calc_tcp_checksum(const uint8_t *ip_hdr, int ip_hdr_len,
                                    const uint8_t *tcp_seg, int tcp_seg_len);
 
+uint16_t crypto_calc_udp_checksum(const uint8_t *ip_hdr, int ip_hdr_len,
+                                   const uint8_t *udp_seg, int udp_seg_len);
+
 #endif

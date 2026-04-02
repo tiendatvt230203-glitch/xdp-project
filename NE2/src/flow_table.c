@@ -23,6 +23,19 @@ static inline void normalize_flow_5tuple(uint32_t *src_ip, uint32_t *dst_ip,
     }
 }
 
+static inline void normalize_flow_ips(uint32_t *src_ip, uint32_t *dst_ip) {
+    if (!src_ip || !dst_ip)
+        return;
+
+    uint32_t a = ntohl(*src_ip);
+    uint32_t b = ntohl(*dst_ip);
+    if (a > b) {
+        uint32_t tmp = *src_ip;
+        *src_ip = *dst_ip;
+        *dst_ip = tmp;
+    }
+}
+
 static uint32_t flow_hash(uint32_t src_ip, uint32_t dst_ip,
                           uint16_t src_port, uint16_t dst_port,
                           uint8_t protocol) {
@@ -111,23 +124,20 @@ int flow_table_get_wan(struct flow_table *ft,
                        uint32_t src_ip, uint32_t dst_ip,
                        uint16_t src_port, uint16_t dst_port,
                        uint8_t protocol, uint32_t pkt_len) {
-    normalize_flow_5tuple(&src_ip, &dst_ip, &src_port, &dst_port);
-    uint32_t idx = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
+    /* WAN selection must be IP-only (src_ip/dst_ip), not 5-tuple. */
+    normalize_flow_ips(&src_ip, &dst_ip);
+    uint32_t idx = flow_hash_ips(src_ip, dst_ip);
     uint64_t now = get_time_sec();
     int wan_idx;
 
     pthread_mutex_lock(&ft->locks[idx]);
 
     struct flow_entry *entry = ft->buckets[idx];
-    struct flow_entry *prev = NULL;
 
     while (entry) {
-        if (!entry->ip_only_key &&
+        if (entry->ip_only_key &&
             entry->key.src_ip == src_ip &&
-            entry->key.dst_ip == dst_ip &&
-            entry->key.src_port == src_port &&
-            entry->key.dst_port == dst_port &&
-            entry->key.protocol == protocol) {
+            entry->key.dst_ip == dst_ip) {
 
             entry->last_seen = now;
             entry->byte_count += pkt_len;
@@ -146,7 +156,6 @@ int flow_table_get_wan(struct flow_table *ft,
             pthread_mutex_unlock(&ft->locks[idx]);
             return wan_idx;
         }
-        prev = entry;
         entry = entry->next;
     }
 
@@ -166,7 +175,7 @@ int flow_table_get_wan(struct flow_table *ft,
     entry->wrr_slot = 0;
     entry->last_seen = now;
     entry->valid = 1;
-    entry->ip_only_key = 0;
+    entry->ip_only_key = 1;
     entry->profile_wan_pool = 0;
     entry->next = ft->buckets[idx];
     ft->buckets[idx] = entry;
@@ -223,8 +232,9 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     if (allowed_count == 1)
         return allowed_wans[0];
 
-    normalize_flow_5tuple(&src_ip, &dst_ip, &src_port, &dst_port);
-    uint32_t idx = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
+    /* WAN selection must be IP-only (src_ip/dst_ip), not 5-tuple. */
+    normalize_flow_ips(&src_ip, &dst_ip);
+    uint32_t idx = flow_hash_ips(src_ip, dst_ip);
     uint64_t now = get_time_sec();
 
     pthread_mutex_lock(&ft->locks[idx]);
@@ -232,12 +242,9 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     struct flow_entry *entry = ft->buckets[idx];
 
     while (entry) {
-        if (!entry->ip_only_key && entry->profile_wan_pool &&
+        if (entry->ip_only_key && entry->profile_wan_pool &&
             entry->key.src_ip == src_ip &&
-            entry->key.dst_ip == dst_ip &&
-            entry->key.src_port == src_port &&
-            entry->key.dst_port == dst_port &&
-            entry->key.protocol == protocol) {
+            entry->key.dst_ip == dst_ip) {
 
             int pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
             if (pos < 0) {
@@ -289,13 +296,13 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     entry->byte_count = pkt_len;
     entry->last_seen = now;
     entry->valid = 1;
-    entry->ip_only_key = 0;
+    entry->ip_only_key = 1;
     entry->profile_wan_pool = 1;
     entry->next = ft->buckets[idx];
 
     int sumw = weights_sum_positive(allowed_weights, allowed_count);
     if (sumw > 0 && allowed_weights) {
-        uint32_t h = flow_mix_5tuple(src_ip, dst_ip, src_port, dst_port, protocol);
+        uint32_t h = flow_hash_ips(src_ip, dst_ip);
         entry->wrr_slot = (int)(h % (uint32_t)sumw);
         entry->current_wan = wrr_slot_to_wan(entry->wrr_slot, allowed_wans, allowed_weights,
                                              allowed_count, sumw);

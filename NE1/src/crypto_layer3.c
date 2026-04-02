@@ -14,6 +14,9 @@
 #define IPV4_DST_OFFSET    (ETH_HEADER_SIZE + 16)
 #define IPV4_ADDR_LEN      4
 
+#define TCP_CKSUM_OFF       16
+#define UDP_CKSUM_OFF       6
+
 #define IPV6_NEXTHDR_OFF   (ETH_HEADER_SIZE + 6)
 #define IPV6_PAYLEN_OFF    (ETH_HEADER_SIZE + 4)
 #define IPV6_SRC_OFFSET    (ETH_HEADER_SIZE + 8)
@@ -210,6 +213,44 @@ int crypto_layer3_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
             uint16_t cksum = crypto_calc_ip_checksum(packet + ETH_HEADER_SIZE, IPV4_HDR_SIZE);
             packet[IPV4_CKSUM_OFF] = (uint8_t)(cksum >> 8);
             packet[IPV4_CKSUM_OFF + 1] = (uint8_t)(cksum & 0xFF);
+
+            /* Restore L4 checksum(s) for the restored protocol.
+             * TCP/UDP checksums include fields from the restored IP header,
+             * so after decrypt/strip we must recompute for correctness.
+             */
+            size_t dec_pkt_len = pkt_len - (size_t)total_overhead;
+            int ip_hdr_len = (packet[ETH_HEADER_SIZE] & 0x0F) * 4;
+            size_t transport_off = (size_t)ETH_HEADER_SIZE + (size_t)ip_hdr_len;
+
+            if (dec_pkt_len > transport_off) {
+                if (orig_proto == 6) {
+                    size_t tcp_seg_len = dec_pkt_len - transport_off;
+                    if (tcp_seg_len >= 20) {
+                        uint8_t *tcp_seg = packet + transport_off;
+                        tcp_seg[TCP_CKSUM_OFF] = 0;
+                        tcp_seg[TCP_CKSUM_OFF + 1] = 0;
+                        uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + ETH_HEADER_SIZE,
+                                                                      ip_hdr_len,
+                                                                      tcp_seg,
+                                                                      (int)tcp_seg_len);
+                        tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
+                        tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+                    }
+                } else if (orig_proto == 17) {
+                    size_t udp_seg_len = dec_pkt_len - transport_off;
+                    if (udp_seg_len >= 8) {
+                        uint8_t *udp_seg = packet + transport_off;
+                        udp_seg[UDP_CKSUM_OFF] = 0;
+                        udp_seg[UDP_CKSUM_OFF + 1] = 0;
+                        uint16_t udp_cksum = crypto_calc_udp_checksum(packet + ETH_HEADER_SIZE,
+                                                                      ip_hdr_len,
+                                                                      udp_seg,
+                                                                      (int)udp_seg_len);
+                        udp_seg[UDP_CKSUM_OFF] = (uint8_t)(udp_cksum >> 8);
+                        udp_seg[UDP_CKSUM_OFF + 1] = (uint8_t)(udp_cksum & 0xFF);
+                    }
+                }
+            }
         } 
         
         else {

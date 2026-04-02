@@ -13,6 +13,7 @@
 #define TCP_SEQ_OFF   4
 #define TCP_FLAGS_OFF 13
 #define TCP_CKSUM_OFF 16
+#define UDP_CKSUM_OFF 6
 
 static void l4_write_tunnel_header(uint8_t *buf, const uint8_t *nonce,
                                     int nonce_size) {
@@ -267,7 +268,7 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
         packet[l3_off + 10] = (uint8_t)(cksum >> 8);
         packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-        /* TCP checksum must be recomputed after decrypt/strip. */
+        /* Recompute transport checksum after decrypt/strip. */
         size_t new_pkt_len = pkt_len - (size_t)total_overhead;
         if (ip_proto == 6) {
             uint8_t *tcp_seg = packet + transport_off;
@@ -277,6 +278,17 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
             uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off, ip_hdr_len, tcp_seg, tcp_seg_len);
             tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
             tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+        } else if (ip_proto == 17) {
+            uint8_t *udp_seg = packet + transport_off;
+            size_t udp_seg_len = new_pkt_len - (size_t)transport_off;
+            if (udp_seg_len >= 8) {
+                udp_seg[UDP_CKSUM_OFF] = 0;
+                udp_seg[UDP_CKSUM_OFF + 1] = 0;
+                uint16_t udp_cksum = crypto_calc_udp_checksum(packet + l3_off, ip_hdr_len,
+                                                                udp_seg, (int)udp_seg_len);
+                udp_seg[UDP_CKSUM_OFF] = (uint8_t)(udp_cksum >> 8);
+                udp_seg[UDP_CKSUM_OFF + 1] = (uint8_t)(udp_cksum & 0xFF);
+            }
         }
 
         return (int)new_pkt_len;
@@ -476,6 +488,35 @@ int crypto_layer4_decrypt_fragment(struct packet_crypto_ctx *ctx,
         uint16_t cksum = crypto_calc_ip_checksum(packet + l3_off, ip_hdr_len);
         packet[l3_off + 10] = (uint8_t)(cksum >> 8);
         packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
+
+        /* Restore transport checksum(s) after decrypt/strip. */
+        size_t new_pkt_len = pkt_len - (size_t)total_overhead;
+        if (ip_proto == 6) {
+            uint8_t *tcp_seg = packet + transport_off;
+            size_t tcp_seg_len = new_pkt_len - (size_t)transport_off;
+            if (tcp_seg_len >= 20) {
+                tcp_seg[TCP_CKSUM_OFF] = 0;
+                tcp_seg[TCP_CKSUM_OFF + 1] = 0;
+                uint16_t tcp_cksum = crypto_calc_tcp_checksum(packet + l3_off,
+                                                              ip_hdr_len,
+                                                              tcp_seg,
+                                                              (int)tcp_seg_len);
+                tcp_seg[TCP_CKSUM_OFF] = (uint8_t)(tcp_cksum >> 8);
+                tcp_seg[TCP_CKSUM_OFF + 1] = (uint8_t)(tcp_cksum & 0xFF);
+            }
+        } else if (ip_proto == 17) {
+            uint8_t *udp_seg = packet + transport_off;
+            size_t udp_seg_len = new_pkt_len - (size_t)transport_off;
+            if (udp_seg_len >= 8) {
+                udp_seg[UDP_CKSUM_OFF] = 0;
+                udp_seg[UDP_CKSUM_OFF + 1] = 0;
+                uint16_t udp_cksum = crypto_calc_udp_checksum(packet + l3_off,
+                                                                ip_hdr_len,
+                                                                udp_seg, (int)udp_seg_len);
+                udp_seg[UDP_CKSUM_OFF] = (uint8_t)(udp_cksum >> 8);
+                udp_seg[UDP_CKSUM_OFF + 1] = (uint8_t)(udp_cksum & 0xFF);
+            }
+        }
 
         return (int)(pkt_len - total_overhead);
     }

@@ -492,6 +492,33 @@ int frag_try_reassemble(struct frag_table *ft,
             uint16_t cksum = crypto_calc_ip_checksum(out_buf + 14, entry->ip_hdr_len);
             out_buf[14 + 10] = (uint8_t)(cksum >> 8);
             out_buf[14 + 11] = (uint8_t)(cksum & 0xFF);
+
+            /* Transport checksum restoration for TCP/UDP (IPv4) */
+            if (entry->orig_proto == 6 && total_payload >= 20) {
+                uint8_t *tcp_seg = out_buf + 14 + entry->ip_hdr_len;
+                int tcp_seg_len = (int)total_payload;
+                tcp_seg[16] = 0;
+                tcp_seg[17] = 0;
+                uint16_t tcp_cksum = crypto_calc_tcp_checksum(out_buf + 14,
+                                                               entry->ip_hdr_len,
+                                                               tcp_seg,
+                                                               tcp_seg_len);
+                tcp_seg[16] = (uint8_t)(tcp_cksum >> 8);
+                tcp_seg[17] = (uint8_t)(tcp_cksum & 0xFF);
+            } else if (entry->orig_proto == 17 && total_payload >= 8) {
+                uint8_t *udp_seg = out_buf + 14 + entry->ip_hdr_len;
+                uint16_t old_udp_ck = ((uint16_t)udp_seg[6] << 8) | udp_seg[7];
+                if (old_udp_ck != 0) {
+                    udp_seg[6] = 0;
+                    udp_seg[7] = 0;
+                    uint16_t udp_cksum = crypto_calc_udp_checksum(out_buf + 14,
+                                                                    entry->ip_hdr_len,
+                                                                    udp_seg,
+                                                                    (int)total_payload);
+                    udp_seg[6] = (uint8_t)(udp_cksum >> 8);
+                    udp_seg[7] = (uint8_t)(udp_cksum & 0xFF);
+                }
+            }
         } 
         
         else {
@@ -921,6 +948,15 @@ int frag_try_reassemble_l4(struct frag_table *ft,
                                                           tcp_out, tcp_seg_len);
             tcp_out[16] = (uint8_t)(tcp_cksum >> 8);
             tcp_out[17] = (uint8_t)(tcp_cksum & 0xFF);
+        } else if (entry->orig_proto == 17 && entry->transport_hdr_len >= 8) {
+            uint8_t *udp_out = out_buf + 14 + entry->ip_hdr_len;
+            int udp_seg_len = (int)(off - 14 - entry->ip_hdr_len);
+            udp_out[6] = 0;
+            udp_out[7] = 0;
+            uint16_t udp_cksum = crypto_calc_udp_checksum(out_buf + 14, entry->ip_hdr_len,
+                                                            udp_out, udp_seg_len);
+            udp_out[6] = (uint8_t)(udp_cksum >> 8);
+            udp_out[7] = (uint8_t)(udp_cksum & 0xFF);
         }
 
         *out_len = (uint32_t)off;

@@ -687,9 +687,14 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
             }
         }
 
-        if ((has_l2 + has_l3 + has_l4) > 1) {
+        /*
+         * Marker rules:
+         * - encrypt_l2 and encrypt_l3 cannot overlap (EtherType marker vs protocol marker).
+         * - encrypt_l3 and encrypt_l4 can overlap (TCP vs UDP example: different policy actions).
+         */
+        if (has_l2 && has_l3) {
             fprintf(stderr,
-                    "[DB CRYPTO] Invalid policy set: encrypt_l2/encrypt_l3/encrypt_l4 are mutually exclusive per config_id\n");
+                    "[DB CRYPTO] Invalid policy set: encrypt_l2 and encrypt_l3 cannot overlap per config_id\n");
             return -1;
         }
 
