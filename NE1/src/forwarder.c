@@ -374,13 +374,15 @@ static void sigint_handler(int sig) {
 }
 
 static uint32_t get_dest_ip(void *pkt_data, uint32_t pkt_len) {
-    if (pkt_len < sizeof(struct ether_header) + sizeof(struct iphdr))
+    /* Must respect possible VLAN/extra L2 headers; don't assume Ethernet+IPv4 is fixed at offset 14. */
+    uint8_t *pkt = (uint8_t *)pkt_data;
+    int l3_off = crypto_eth_ipv4_offset(pkt, pkt_len);
+    if (l3_off < 0)
         return 0;
-    struct ether_header *eth = (struct ether_header *)pkt_data;
-    if (ntohs(eth->ether_type) != ETHERTYPE_IP)
+    if (pkt_len < (uint32_t)(l3_off + sizeof(struct iphdr)))
         return 0;
-    struct iphdr *ip = (struct iphdr *)(eth + 1);
-    return ip->daddr;
+    struct iphdr *ip = (struct iphdr *)(pkt + l3_off);
+    return ip->daddr; /* already in network byte order */
 }
 
 static int parse_flow(void *pkt_data, uint32_t pkt_len,
