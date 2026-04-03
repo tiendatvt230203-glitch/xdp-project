@@ -1,5 +1,4 @@
 #include "../inc/db_config.h"
-#include "../inc/config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,11 +6,6 @@
 #include <arpa/inet.h>
 #include <libpq-fe.h>
 #include <strings.h>
-
-static void db_finish(PGconn *conn, PGresult *res) {
-    if (res)  PQclear(res);
-    if (conn) PQfinish(conn);
-}
 
 static int str_is_any(const char *v) {
     if (!v) return 1;
@@ -284,51 +278,6 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
     return 0;
 }
 
-static int load_global_row(struct app_config *cfg, PGresult *res,
-                           char *crypto_key_hex, size_t key_hex_len)
-{
-    const char *v;
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "crypto_enabled"));
-    cfg->crypto_enabled = v ? atoi(v) : 0;
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "encrypt_layer"));
-    cfg->encrypt_layer = v ? atoi(v) : 0;
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "fake_protocol"));
-    cfg->fake_protocol = (uint8_t)(v ? atoi(v) : 0);
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "crypto_mode"));
-    if (v && (strcmp(v, "gcm") == 0 || strcmp(v, "GCM") == 0)) {
-        cfg->crypto_mode = CRYPTO_MODE_GCM;
-    } else {
-        cfg->crypto_mode = CRYPTO_MODE_CTR;
-    }
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "aes_bits"));
-    cfg->aes_bits = v ? atoi(v) : 128;
-    if (cfg->aes_bits != 128 && cfg->aes_bits != 256) {
-        fprintf(stderr, "[DB CRYPTO] Invalid aes_bits (expected 128 or 256)\n");
-        return -1;
-    }
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "nonce_size"));
-    cfg->nonce_size = v ? atoi(v) : 12;
-    if (cfg->nonce_size != 4 && cfg->nonce_size != 8 &&
-        cfg->nonce_size != 12 && cfg->nonce_size != 16) {
-        fprintf(stderr, "[DB CRYPTO] Invalid nonce_size (expected 4, 8, 12, or 16)\n");
-        return -1;
-    }
-
-    v = PQgetvalue(res, 0, PQfnumber(res, "crypto_key"));
-    if (v && v[0] != '\0') {
-        strncpy(crypto_key_hex, v, key_hex_len - 1);
-        crypto_key_hex[key_hex_len - 1] = '\0';
-    }
-
-    return 0;
-}
-
 static int load_local_rows(struct app_config *cfg, PGresult *res)
 {
     int nrows = PQntuples(res);
@@ -452,7 +401,7 @@ static int load_redirect_rules(struct app_config *cfg, PGconn *conn, int config_
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "[DB] Query xdp_redirect_rules failed: %s\n",
-                PQerrorMessage(conn));
+                PQresultErrorMessage(res));
         PQclear(res);
         return -1;
     }
@@ -492,6 +441,189 @@ static int load_redirect_rules(struct app_config *cfg, PGconn *conn, int config_
     return 0;
 }
 
+static int db_verify_config_id(PGconn *conn, int config_id)
+{
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%d", config_id);
+    const char *params[1] = { id_str };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT 1 FROM xdp_configs WHERE id = $1",
+        1, NULL, params, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[DB] Query xdp_configs failed: %s\n", PQresultErrorMessage(res));
+        PQclear(res);
+        return -1;
+    }
+    if (PQntuples(res) == 0) {
+        fprintf(stderr, "[DB] Config ID %d not found in xdp_configs\n", config_id);
+        PQclear(res);
+        return -1;
+    }
+    PQclear(res);
+    return 0;
+}
+
+static int db_load_local_configs(PGconn *conn, struct app_config *cfg, int config_id)
+{
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%d", config_id);
+    const char *params[1] = { id_str };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT ifname, network "
+        "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+        1, NULL, params, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        res = PQexecParams(conn,
+            "SELECT ifname, network "
+            "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
+            1, NULL, params, NULL, NULL, 0);
+    }
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[DB] Query xdp_local_configs failed: %s\n", PQresultErrorMessage(res));
+        PQclear(res);
+        return -1;
+    }
+
+    if (load_local_rows(cfg, res) != 0) {
+        PQclear(res);
+        return -1;
+    }
+    PQclear(res);
+    return 0;
+}
+
+static int db_load_wan_configs(PGconn *conn, struct app_config *cfg, int config_id)
+{
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%d", config_id);
+    const char *params[1] = { id_str };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT ifname, dst_ip "
+        "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
+        1, NULL, params, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        res = PQexecParams(conn,
+            "SELECT ifname, dst_ip, src_mac, dst_mac "
+            "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
+            1, NULL, params, NULL, NULL, 0);
+    }
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        res = PQexecParams(conn,
+            "SELECT ifname FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
+            1, NULL, params, NULL, NULL, 0);
+    }
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[DB] Query xdp_wan_configs failed: %s\n", PQresultErrorMessage(res));
+        PQclear(res);
+        return -1;
+    }
+
+    if (load_wan_rows(cfg, res) != 0) {
+        PQclear(res);
+        return -1;
+    }
+    PQclear(res);
+    return 0;
+}
+
+static int apply_crypto_derived_from_policies(struct app_config *cfg)
+{
+    cfg->crypto_enabled = 0;
+    cfg->encrypt_layer = 0;
+    cfg->fake_protocol = 0;
+    cfg->fake_ethertype_ipv4 = 0;
+    cfg->fake_ethertype_ipv6 = 0;
+    cfg->crypto_mode = CRYPTO_MODE_CTR;
+    cfg->aes_bits = 128;
+    cfg->nonce_size = 12;
+    memset(cfg->crypto_key, 0, sizeof(cfg->crypto_key));
+
+    if (cfg->policy_count <= 0)
+        return 0;
+
+    int has_l2 = 0, has_l3 = 0, has_l4 = 0;
+    int first_key_pi = -1;
+
+    for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
+        const struct crypto_policy *cp = &cfg->policies[pi];
+        if (!cp) continue;
+        if (cp->action == POLICY_ACTION_ENCRYPT_L2) has_l2 = 1;
+        else if (cp->action == POLICY_ACTION_ENCRYPT_L3) has_l3 = 1;
+        else if (cp->action == POLICY_ACTION_ENCRYPT_L4) has_l4 = 1;
+
+        if (cp->action != POLICY_ACTION_BYPASS) {
+            int nonzero = 0;
+            for (int k = 0; k < AES_KEY_LEN; k++) {
+                if (cp->key[k] != 0) { nonzero = 1; break; }
+            }
+            if (nonzero && first_key_pi < 0)
+                first_key_pi = pi;
+        }
+    }
+
+    if (has_l2 && has_l3) {
+        fprintf(stderr,
+                "[DB CRYPTO] Invalid policy set: encrypt_l2 and encrypt_l3 cannot overlap per config_id\n");
+        return -1;
+    }
+
+    cfg->crypto_enabled = (has_l2 || has_l3 || has_l4) ? 1 : 0;
+    if (cfg->crypto_enabled) {
+        if (has_l2) cfg->encrypt_layer = 2;
+        else if (has_l3) cfg->encrypt_layer = 3;
+        else cfg->encrypt_layer = 4;
+    }
+
+    if (cfg->crypto_enabled) {
+        if (first_key_pi < 0) {
+            fprintf(stderr,
+                    "[DB CRYPTO] policies request encryption but no crypto_key was provided in xdp_profile_crypto_policies\n");
+            return -1;
+        }
+        const struct crypto_policy *cp = &cfg->policies[first_key_pi];
+        cfg->crypto_mode = cp->crypto_mode;
+        cfg->aes_bits = (cp->aes_bits == 256) ? 256 : 128;
+        cfg->nonce_size = (cp->nonce_size > 0) ? cp->nonce_size : 12;
+        memcpy(cfg->crypto_key, cp->key, sizeof(cfg->crypto_key));
+    }
+
+    if (has_l3) {
+        cfg->fake_protocol = 99;
+    } else if (has_l2) {
+        cfg->fake_ethertype_ipv4 = 0x88b5;
+        cfg->fake_ethertype_ipv6 = 0x88b6;
+    }
+
+    return 0;
+}
+
+
+static int fetch_config_from_db(struct app_config *cfg, PGconn *conn, int config_id)
+{
+    if (db_verify_config_id(conn, config_id) != 0)
+        return -1;
+    if (db_load_local_configs(conn, cfg, config_id) != 0)
+        return -1;
+    if (load_redirect_rules(cfg, conn, config_id) != 0)
+        return -1;
+    if (db_load_wan_configs(conn, cfg, config_id) != 0)
+        return -1;
+    if (load_profiles_and_policies(cfg, conn, config_id) != 0)
+        return -1;
+    return 0;
+}
 
 int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_str)
 {
@@ -532,180 +664,15 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
         return -1;
     }
 
-    char id_str[32];
-    snprintf(id_str, sizeof(id_str), "%d", config_id);
-
-    {
-        const char *params[1] = { id_str };
-        PGresult *res = PQexecParams(conn,
-            "SELECT 1 FROM xdp_configs WHERE id = $1",
-            1, NULL, params, NULL, NULL, 0);
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            fprintf(stderr, "[DB] Query xdp_configs failed: %s\n", PQerrorMessage(conn));
-            db_finish(conn, res);
-            return -1;
-        }
-
-        if (PQntuples(res) == 0) {
-            fprintf(stderr, "[DB] Config ID %d not found in xdp_configs\n", config_id);
-            db_finish(conn, res);
-            return -1;
-        }
-
-        PQclear(res);
-    }
-
-    {
-        const char *params[1] = { id_str };
-        PGresult *res = PQexecParams(conn,
-            "SELECT ifname, network "
-            "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
-            1, NULL, params, NULL, NULL, 0);
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            PQclear(res);
-            res = PQexecParams(conn,
-                "SELECT ifname, network "
-                "FROM xdp_local_configs WHERE config_id = $1 ORDER BY id",
-                1, NULL, params, NULL, NULL, 0);
-        }
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            fprintf(stderr, "[DB] Query xdp_local_configs failed: %s\n", PQerrorMessage(conn));
-            db_finish(conn, res);
-            return -1;
-        }
-
-        if (load_local_rows(cfg, res) != 0) {
-            db_finish(conn, res);
-            return -1;
-        }
-        PQclear(res);
-    }
-
-    if (load_redirect_rules(cfg, conn, config_id) != 0) {
-        PQfinish(conn);
-        return -1;
-    }
-
-    {
-        const char *params[1] = { id_str };
-
-        PGresult *res = PQexecParams(conn,
-            "SELECT ifname, dst_ip "
-            "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
-            1, NULL, params, NULL, NULL, 0);
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            PQclear(res);
-            res = PQexecParams(conn,
-                "SELECT ifname, dst_ip, src_mac, dst_mac "
-                "FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
-                1, NULL, params, NULL, NULL, 0);
-        }
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            PQclear(res);
-            res = PQexecParams(conn,
-                "SELECT ifname FROM xdp_wan_configs WHERE config_id = $1 ORDER BY id",
-                1, NULL, params, NULL, NULL, 0);
-        }
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            fprintf(stderr, "[DB] Query xdp_wan_configs failed: %s\n", PQerrorMessage(conn));
-            db_finish(conn, res);
-            return -1;
-        }
-
-        if (load_wan_rows(cfg, res) != 0) {
-            db_finish(conn, res);
-            return -1;
-        }
-        PQclear(res);
-    }
-
-    if (load_profiles_and_policies(cfg, conn, config_id) != 0) {
+    if (fetch_config_from_db(cfg, conn, config_id) != 0) {
         PQfinish(conn);
         return -1;
     }
 
     PQfinish(conn);
 
-    /*
-     * Clean design: derive runtime crypto from xdp_profile_crypto_policies.
-     * xdp_configs is anchor-only (config_id existence).
-     */
-    cfg->crypto_enabled = 0;
-    cfg->encrypt_layer = 0;
-    cfg->fake_protocol = 0;
-    cfg->fake_ethertype_ipv4 = 0;
-    cfg->fake_ethertype_ipv6 = 0;
-    cfg->crypto_mode = CRYPTO_MODE_CTR;
-    cfg->aes_bits = 128;
-    cfg->nonce_size = 12;
-    memset(cfg->crypto_key, 0, sizeof(cfg->crypto_key));
-
-    if (cfg->policy_count > 0) {
-        int has_l2 = 0, has_l3 = 0, has_l4 = 0;
-        int first_key_pi = -1;
-
-        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &cfg->policies[pi];
-            if (!cp) continue;
-            if (cp->action == POLICY_ACTION_ENCRYPT_L2) has_l2 = 1;
-            else if (cp->action == POLICY_ACTION_ENCRYPT_L3) has_l3 = 1;
-            else if (cp->action == POLICY_ACTION_ENCRYPT_L4) has_l4 = 1;
-
-            if (cp->action != POLICY_ACTION_BYPASS) {
-                int nonzero = 0;
-                for (int k = 0; k < AES_KEY_LEN; k++) {
-                    if (cp->key[k] != 0) { nonzero = 1; break; }
-                }
-                if (nonzero && first_key_pi < 0)
-                    first_key_pi = pi;
-            }
-        }
-
-        /*
-         * Marker rules:
-         * - encrypt_l2 and encrypt_l3 cannot overlap (EtherType marker vs protocol marker).
-         * - encrypt_l3 and encrypt_l4 can overlap (TCP vs UDP example).
-         */
-        if (has_l2 && has_l3) {
-            fprintf(stderr,
-                    "[DB CRYPTO] Invalid policy set: encrypt_l2 and encrypt_l3 cannot overlap per config_id\n");
-            return -1;
-        }
-
-        cfg->crypto_enabled = (has_l2 || has_l3 || has_l4) ? 1 : 0;
-        if (cfg->crypto_enabled) {
-            if (has_l2) cfg->encrypt_layer = 2;
-            else if (has_l3) cfg->encrypt_layer = 3;
-            else cfg->encrypt_layer = 4;
-        }
-
-        if (cfg->crypto_enabled) {
-            if (first_key_pi < 0) {
-                fprintf(stderr,
-                        "[DB CRYPTO] policies request encryption but no crypto_key was provided in xdp_profile_crypto_policies\n");
-                return -1;
-            }
-            const struct crypto_policy *cp = &cfg->policies[first_key_pi];
-            cfg->crypto_mode = cp->crypto_mode;
-            cfg->aes_bits = (cp->aes_bits == 256) ? 256 : 128;
-            cfg->nonce_size = (cp->nonce_size > 0) ? cp->nonce_size : 12;
-            memcpy(cfg->crypto_key, cp->key, sizeof(cfg->crypto_key));
-        }
-
-        /* Markers are per-encryption-layer and must not overlap. */
-        if (has_l3) {
-            cfg->fake_protocol = 99;
-        } else if (has_l2) {
-            cfg->fake_ethertype_ipv4 = 0x88b5;
-            cfg->fake_ethertype_ipv6 = 0x88b6;
-        }
-    }
+    if (apply_crypto_derived_from_policies(cfg) != 0)
+        return -1;
 
     return config_validate(cfg);
 }
