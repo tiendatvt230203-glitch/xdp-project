@@ -1002,10 +1002,34 @@ static void *wan_queue_thread_l2(void *arg) {
                 uint32_t src_ip, dst_ip;
                 uint16_t src_port, dst_port;
                 uint8_t protocol;
-                if (parse_flow(final_pkt, final_len, &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0)
+                if (parse_flow(final_pkt, final_len, &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0) {
+                    /* Hardcoded debug for 192.168.9.2 -> 192.168.182.2 after decrypt (Server01 -> Server02). */
+                    static int dbg_init = 0;
+                    static uint32_t dbg_src = 0;
+                    static uint32_t dbg_dst = 0;
+                    if (!dbg_init) {
+                        struct in_addr a_src, a_dst;
+                        inet_pton(AF_INET, "192.168.9.2", &a_src);
+                        inet_pton(AF_INET, "192.168.182.2", &a_dst);
+                        dbg_src = a_src.s_addr;
+                        dbg_dst = a_dst.s_addr;
+                        dbg_init = 1;
+                    }
+                    if (dbg_init && src_ip == dbg_src && dst_ip == dbg_dst) {
+                        char sbuf[INET_ADDRSTRLEN] = {0};
+                        char dbuf[INET_ADDRSTRLEN] = {0};
+                        struct in_addr sa = { .s_addr = src_ip };
+                        struct in_addr da = { .s_addr = dst_ip };
+                        inet_ntop(AF_INET, &sa, sbuf, sizeof(sbuf));
+                        inet_ntop(AF_INET, &da, dbuf, sizeof(dbuf));
+                        fprintf(stdout,
+                                "[L3_DEBUG_AFTER_DECRYPT path=wan_l3l4] src=%s dst=%s proto=%u len=%u\n",
+                                sbuf, dbuf, (unsigned)protocol, (unsigned)final_len);
+                    }
                     tq = (int)(flow_hash_local_tq(src_ip, dst_ip, src_port, dst_port, protocol) % (uint32_t)nq);
-                else
+                } else {
                     tq = args->wan_worker_index >= 0 ? (args->wan_worker_index % nq) : (tx_base % nq);
+                }
             }
 
             uint8_t dst_mac[6];
