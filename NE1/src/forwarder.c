@@ -1,7 +1,6 @@
 #include "../inc/forwarder.h"
 #include "../inc/packet_crypto.h"
 #include "../inc/flow_table.h"
-#include "../inc/fragment.h"
 #include "../inc/config.h"
 #include "../inc/crypto_layer2.h"
 #include "../inc/crypto_layer3.h"
@@ -47,6 +46,58 @@ static int g_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
 
 
 static struct app_config *g_cfg_ptr = NULL;
+
+static inline uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
+                                                 uint32_t *out_wan_window_sizes,
+                                                 int max_wans) {
+    if (!cfg || !out_wan_window_sizes || max_wans <= 0)
+        return;
+
+    /* Base window (bytes) that will be scaled by BE % weight.
+     * Keeping a large base reduces switching frequency (more stable, less reorder).
+     */
+    const uint32_t base_kb = WAN_REORDER_WINDOW_KB;
+    const uint32_t base_bytes = base_kb * 1024U;
+
+    /* Don't let low-weight WAN get too tiny (prevents rapid switching). */
+    const uint32_t min_kb = 512; /* 512KB */
+    const uint32_t min_bytes = min_kb * 1024U;
+
+    for (int pi = 0; pi < cfg->profile_count; pi++) {
+        const struct profile_config *p = &cfg->profiles[pi];
+        if (!p->enabled || p->wan_count <= 0)
+            continue;
+
+        int sumw = 0;
+        for (int i = 0; i < p->wan_count; i++) {
+            int w = p->wan_bandwidth_weight[i];
+            if (w > 0)
+                sumw += w;
+        }
+        if (sumw <= 0)
+            continue; /* no explicit weights -> keep default windows */
+
+        for (int i = 0; i < p->wan_count; i++) {
+            int wan_idx = p->wan_indices[i];
+            int w = p->wan_bandwidth_weight[i];
+            if (wan_idx < 0 || wan_idx >= max_wans)
+                continue;
+            if (w <= 0)
+                continue; /* weight=0 means excluded when any_weight is enabled */
+
+            uint64_t scaled = ((uint64_t)base_bytes * (uint64_t)w) / (uint64_t)sumw;
+            uint32_t win = (scaled > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)scaled;
+            win = clamp_u32(win, min_bytes, base_bytes);
+            out_wan_window_sizes[wan_idx] = win;
+        }
+    }
+}
 
 static int select_wan_idx_for_packet(struct forwarder *fwd,
                                      uint32_t src_ip, uint32_t dst_ip,
@@ -316,84 +367,6 @@ static int decrypt_packet_auto_by_action(struct forwarder *fwd,
                                                 scratch, scratch_sz);
 }
 
-static int frag_decrypt_fragment_auto_l3(struct forwarder *fwd,
-                                          uint8_t *pkt, size_t pkt_len,
-                                          uint16_t *frag_pkt_id,
-                                          uint8_t *frag_index,
-                                          uint8_t *scratch, size_t scratch_sz) {
-    if (!crypto_enabled || !fwd || !fwd->cfg || !pkt || !frag_pkt_id || !frag_index)
-        return -1;
-
-    if (fwd->cfg->policy_count <= 0) {
-        apply_default_crypto_params(fwd);
-        return frag_decrypt_fragment(&crypto_ctx, pkt, pkt_len, frag_pkt_id, frag_index);
-    }
-
-    uint8_t policy_id = 0;
-    if (l3_extract_policy_id(pkt, (uint32_t)pkt_len, &policy_id) != 0) {
-        return -1;
-    }
-
-    for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-        const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-        if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L3)
-            continue;
-        if (!g_policy_crypto_ctx_ready[pi])
-            continue;
-        if ((uint8_t)(cp->id & 0x7F) != policy_id)
-            continue;
-
-        apply_crypto_params_from_policy(cp);
-        int dec_len = frag_decrypt_fragment(&g_policy_crypto_ctx[pi],
-                                             pkt, pkt_len, frag_pkt_id, frag_index);
-        if (dec_len < 0)
-            return -1;
-        return dec_len;
-    }
-
-    return -1;
-}
-
-static int frag_decrypt_fragment_auto_l4(struct forwarder *fwd,
-                                           uint8_t *pkt, size_t pkt_len,
-                                           uint16_t *frag_pkt_id,
-                                           uint8_t *frag_index) {
-    if (!crypto_enabled || !fwd || !fwd->cfg || !pkt || !frag_pkt_id || !frag_index)
-        return -1;
-
-    if (fwd->cfg->policy_count <= 0) {
-        apply_default_crypto_params(fwd);
-        return frag_decrypt_fragment_l4(&crypto_ctx, pkt, pkt_len, frag_pkt_id, frag_index);
-    }
-
-    uint8_t policy_id = 0;
-    int nonce_size = 0;
-    if (l4_extract_policy_id_ipv4(pkt, (uint32_t)pkt_len, &policy_id, &nonce_size) != 0) {
-        return -1;
-    }
-
-    for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-        const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-        if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4)
-            continue;
-        if (!g_policy_crypto_ctx_ready[pi])
-            continue;
-        if ((uint8_t)(cp->id & 0x7F) != policy_id)
-            continue;
-        if (cp->nonce_size != nonce_size)
-            continue;
-
-        apply_crypto_params_from_policy(cp);
-        int dec_len = frag_decrypt_fragment_l4(&g_policy_crypto_ctx[pi],
-                                                 pkt, pkt_len,
-                                                 frag_pkt_id, frag_index);
-        if (dec_len < 0)
-            return -1;
-        return dec_len;
-    }
-
-    return -1;
-}
 
 static void sigint_handler(int sig) {
     (void)sig;
@@ -467,6 +440,7 @@ static inline uint32_t flow_hash_local_tq(uint32_t src_ip, uint32_t dst_ip,
 
 static void *gc_thread(void *arg) {
     (void)arg;
+    pin_thread_to_core(0);
     while (running) {
         sleep(60); 
         flow_table_gc(&g_flow_table);
@@ -1213,92 +1187,6 @@ static void *worker_thread(void *arg) {
             } else {
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
             }
-        } else if (crypto_layer == 3 && 0) {
-
-            uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            uint32_t f1_len = 0, f2_len = 0;
-            if (frag_split_and_encrypt(use_ctx,
-                                       pkt, pkt_len,
-                                       frag1_buf, &f1_len,
-                                       frag2_buf, &f2_len) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            if (set_wan_l2_addrs(fwd, wan_idx, frag1_buf) != 0 ||
-                set_wan_l2_addrs(fwd, wan_idx, frag2_buf) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            uint32_t wire_total = f1_len + f2_len;
-            if (wire_total > pkt_len) {
-                flow_table_add_bytes(&g_flow_table,
-                                     src_ip, dst_ip, src_port, dst_port,
-                                     protocol, wire_total - pkt_len);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                wan_used[wan_idx] = 1;
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
-        } else if (crypto_layer == 2 && 0) {
-
-            uint8_t *pkt = (uint8_t *)job.pkt_ptr;
-            if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            uint32_t f1_len = 0, f2_len = 0;
-            if (frag_split_and_encrypt_l2(&crypto_ctx,
-                                          pkt, pkt_len,
-                                          frag1_buf, &f1_len,
-                                          frag2_buf, &f2_len) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            if (set_wan_l2_addrs(fwd, wan_idx, frag1_buf) != 0 ||
-                set_wan_l2_addrs(fwd, wan_idx, frag2_buf) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                goto release_local;
-            }
-
-            uint32_t wire_total = f1_len + f2_len;
-            if (wire_total > pkt_len) {
-                flow_table_add_bytes(&g_flow_table,
-                                     src_ip, dst_ip, src_port, dst_port,
-                                     protocol, wire_total - pkt_len);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag1_buf, f1_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-                wan_used[wan_idx] = 1;
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
-            if (interface_send_batch_queue(wan, tq, frag2_buf, f2_len) == 0) {
-                __sync_fetch_and_add(&fwd->local_to_wan, 1);
-            } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-            }
-
         } else {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
@@ -1427,6 +1315,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     uint32_t wan_window_sizes[MAX_INTERFACES] = {0};
     for (int i = 0; i < cfg->wan_count && i < MAX_INTERFACES; i++)
         wan_window_sizes[i] = cfg->wans[i].window_size;
+    compute_profile_weighted_wan_windows(cfg, wan_window_sizes, cfg->wan_count);
     flow_table_init(&g_flow_table, wan_window_sizes, cfg->wan_count);
 
     int total_threads = 0;
@@ -1562,7 +1451,7 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_no_crypto, &args[thread_idx]);
@@ -1580,7 +1469,7 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 4 + (wan_worker_idx % 4);
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread_no_crypto, &args[thread_idx]);
@@ -1647,7 +1536,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_l2, &args[thread_idx]);
@@ -1665,7 +1554,7 @@ static void forwarder_run_l2(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 6 + (wan_worker_idx % 6);
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread_l2, &args[thread_idx]);
@@ -1725,7 +1614,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_l3l4, &args[thread_idx]);
@@ -1743,7 +1632,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 8 + (wan_worker_idx % 4);
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread_l3l4, &args[thread_idx]);
@@ -1758,7 +1647,7 @@ static void forwarder_run_l3(struct forwarder *fwd) {
         args[thread_idx].iface_idx = -1;
         args[thread_idx].queue_idx = -1;
         args[thread_idx].tx_queue_base = 0;
-        args[thread_idx].core_id = 4 + w;
+        args[thread_idx].core_id = 0;
         args[thread_idx].wan_worker_index = -1;
         args[thread_idx].worker_id = w;
         pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);
@@ -1816,7 +1705,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = local_rx_idx % 4;
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = -1;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, local_queue_thread_l3l4, &args[thread_idx]);
@@ -1834,7 +1723,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
             args[thread_idx].iface_idx = i;
             args[thread_idx].queue_idx = q;
             args[thread_idx].tx_queue_base = q;
-            args[thread_idx].core_id = 8 + (wan_worker_idx % 4);
+            args[thread_idx].core_id = 0;
             args[thread_idx].wan_worker_index = wan_worker_idx;
             args[thread_idx].worker_id = -1;
             pthread_create(&threads[thread_idx], NULL, wan_queue_thread_l3l4, &args[thread_idx]);
@@ -1849,7 +1738,7 @@ static void forwarder_run_l4(struct forwarder *fwd) {
         args[thread_idx].iface_idx = -1;
         args[thread_idx].queue_idx = -1;
         args[thread_idx].tx_queue_base = 0;
-        args[thread_idx].core_id = 4 + w;
+        args[thread_idx].core_id = 0;
         args[thread_idx].wan_worker_index = -1;
         args[thread_idx].worker_id = w;
         pthread_create(&threads[thread_idx], NULL, worker_thread, &args[thread_idx]);

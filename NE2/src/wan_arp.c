@@ -15,9 +15,17 @@
 #include <net/if_arp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sched.h>
 
 static int mac_is_nonzero6(const uint8_t mac[6]) {
     return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
+}
+
+static void pin_self_to_core0(void) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(0, &cpuset);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
 static int get_iface_mac_and_ip(const char *ifname, uint8_t mac_out[6], uint32_t *ip_out) {
@@ -172,6 +180,8 @@ void arp_send_request(struct arp_cache *c, uint32_t target_ip) {
 void *arp_listener_thread(void *arg) {
     struct arp_cache *c = (struct arp_cache *)arg;
     uint8_t buf[2048];
+
+    pin_self_to_core0();
 
     uint32_t last_save = (uint32_t)time(NULL);
     while (c && (!c->running_flag || *c->running_flag)) {

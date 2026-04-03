@@ -631,10 +631,6 @@ int config_load_from_db(struct app_config *cfg, int config_id, const char *conn_
 
     PQfinish(conn);
 
-    /*
-     * Clean design: derive runtime crypto from xdp_profile_crypto_policies.
-     * xdp_configs is anchor-only (config_id existence).
-     */
     cfg->crypto_enabled = 0;
     cfg->encrypt_layer = 0;
     cfg->fake_protocol = 0;

@@ -232,9 +232,11 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     if (allowed_count == 1)
         return allowed_wans[0];
 
-    /* WAN selection must be IP-only (src_ip/dst_ip), not 5-tuple. */
-    normalize_flow_ips(&src_ip, &dst_ip);
-    uint32_t idx = flow_hash_ips(src_ip, dst_ip);
+    /* Per-connection WAN selection: use normalized 5-tuple so both directions
+     * map to the same bucket/key, but each TCP/UDP flow is independent.
+     */
+    normalize_flow_5tuple(&src_ip, &dst_ip, &src_port, &dst_port);
+    uint32_t idx = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
     uint64_t now = get_time_sec();
 
     pthread_mutex_lock(&ft->locks[idx]);
@@ -242,9 +244,12 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     struct flow_entry *entry = ft->buckets[idx];
 
     while (entry) {
-        if (entry->ip_only_key && entry->profile_wan_pool &&
+        if (!entry->ip_only_key && entry->profile_wan_pool &&
             entry->key.src_ip == src_ip &&
-            entry->key.dst_ip == dst_ip) {
+            entry->key.dst_ip == dst_ip &&
+            entry->key.src_port == src_port &&
+            entry->key.dst_port == dst_port &&
+            entry->key.protocol == protocol) {
 
             int pos = wan_allowed_pos(entry->current_wan, allowed_wans, allowed_count);
             if (pos < 0) {
@@ -296,13 +301,13 @@ int flow_table_get_wan_profile(struct flow_table *ft,
     entry->byte_count = pkt_len;
     entry->last_seen = now;
     entry->valid = 1;
-    entry->ip_only_key = 1;
+    entry->ip_only_key = 0;
     entry->profile_wan_pool = 1;
     entry->next = ft->buckets[idx];
 
     int sumw = weights_sum_positive(allowed_weights, allowed_count);
     if (sumw > 0 && allowed_weights) {
-        uint32_t h = flow_hash_ips(src_ip, dst_ip);
+        uint32_t h = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
         entry->wrr_slot = (int)(h % (uint32_t)sumw);
         entry->current_wan = wrr_slot_to_wan(entry->wrr_slot, allowed_wans, allowed_weights,
                                              allowed_count, sumw);
