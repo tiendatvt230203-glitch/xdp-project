@@ -944,10 +944,14 @@ static void *wan_queue_thread_l2(void *arg) {
                     }
 
                     char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    char src_parse_str[INET_ADDRSTRLEN] = {0};
                     if (parse_ok) {
+                        struct in_addr sa2 = { .s_addr = src_ip_pf };
                         struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &sa2, src_parse_str, sizeof(src_parse_str));
                         inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
                     } else {
+                        snprintf(src_parse_str, sizeof(src_parse_str), "NA");
                         snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
                     }
 
@@ -1223,10 +1227,13 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     }
 
                     fprintf(stdout,
-                            "[NO_LOCAL_MATCH %s path=wan_l3l4 t=%ld] dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
+                            "[NO_LOCAL_MATCH %s path=wan_l3l4 t=%ld] src=%s:%u dst=%s:%u proto=%u len=%u | dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
                             cause,
                             (long)now,
                             dest_str, dest_ip,
+                            src_parse_str, (unsigned)src_port_pf,
+                            dst_parse_str, (unsigned)dst_port_pf,
+                            (unsigned)protocol_pf, (unsigned)final_len,
                             dst_parse_str, parse_ok ? dst_ip_pf : 0,
                             local_idx_parse,
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
