@@ -1478,8 +1478,10 @@ static void forwarder_run_no_crypto(struct forwarder *fwd) {
         }
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1563,8 +1565,10 @@ static void forwarder_run_l2(struct forwarder *fwd) {
         }
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1654,8 +1658,10 @@ static void forwarder_run_l3(struct forwarder *fwd) {
         thread_idx++;
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1745,8 +1751,10 @@ static void forwarder_run_l4(struct forwarder *fwd) {
         thread_idx++;
     }
 
-    while (running)
+    while (running) {
         sleep(1);
+        forwarder_print_stats(fwd);
+    }
 
     for (int i = 0; i < total_threads; i++)
         pthread_join(threads[i], NULL);
@@ -1778,6 +1786,13 @@ void forwarder_run(struct forwarder *fwd) {
 void forwarder_print_stats(struct forwarder *fwd) {
     if (!fwd) return;
 
+    time_t now = time(NULL);
+    static uint64_t last_total_dropped = 0;
+    static uint64_t last_dropped_bad_ip = 0;
+    static uint64_t last_dropped_no_local_match = 0;
+    static uint64_t last_dropped_local_tx_fail = 0;
+    static uint64_t last_tx_wait_loops = 0;
+
     int nq = (fwd->local_count > 0 && fwd->locals[0].queue_count <= FORWARDER_MAX_LOCAL_QUEUES)
              ? fwd->locals[0].queue_count : 0;
     if (nq <= 0) nq = 1;
@@ -1788,6 +1803,12 @@ void forwarder_print_stats(struct forwarder *fwd) {
             tx_wait_loops += fwd->locals[i].queues[q].tx_wait_loops;
     }
 
+    uint64_t delta_total_dropped = fwd->total_dropped - last_total_dropped;
+    uint64_t delta_bad_ip = fwd->dropped_bad_ip - last_dropped_bad_ip;
+    uint64_t delta_no_local = fwd->dropped_no_local_match - last_dropped_no_local_match;
+    uint64_t delta_local_tx_fail = fwd->dropped_local_tx_fail - last_dropped_local_tx_fail;
+    uint64_t delta_tx_wait_loops = tx_wait_loops - last_tx_wait_loops;
+
     fprintf(stdout,
             "[STATS] local_to_wan=%lu wan_to_local=%lu total_dropped=%lu "
             "dropped_bad_ip=%lu dropped_no_local_match=%lu dropped_local_tx_fail=%lu",
@@ -1797,31 +1818,60 @@ void forwarder_print_stats(struct forwarder *fwd) {
             fwd->dropped_bad_ip,
             fwd->dropped_no_local_match,
             fwd->dropped_local_tx_fail);
-    for (int i = 0; i < nq && i < FORWARDER_MAX_LOCAL_QUEUES; i++)
-        fprintf(stdout, " q%d=%lu", i, (unsigned long)fwd->dropped_local_tx_fail_by_queue[i]);
+    if (delta_local_tx_fail > 0 || delta_total_dropped > 0) {
+        for (int i = 0; i < nq && i < FORWARDER_MAX_LOCAL_QUEUES; i++)
+            fprintf(stdout, " q%d=%lu", i, (unsigned long)fwd->dropped_local_tx_fail_by_queue[i]);
+    }
     fprintf(stdout, " tx_wait_loops=%lu\n", (unsigned long)tx_wait_loops);
 
-    for (int w = 0; w < fwd->wan_count; w++) {
-        const struct wan_config *wc = &fwd->cfg->wans[w];
-        if (wc->dst_ip == 0) {
-            fprintf(stdout, "[WAN ARP] if=%s peer ARP=disabled (static/fallback path)\n",
-                    fwd->wans[w].ifname);
-            continue;
-        }
+    if (delta_total_dropped > 0) {
+        fprintf(stdout,
+                "[DROP_EVENT t=%ld] +%lu total | +%lu bad_ip | +%lu no_local_match | +%lu local_tx_fail | tx_wait_loops_delta=%lu\n",
+                (long)now,
+                (unsigned long)delta_total_dropped,
+                (unsigned long)delta_bad_ip,
+                (unsigned long)delta_no_local,
+                (unsigned long)delta_local_tx_fail,
+                (unsigned long)delta_tx_wait_loops);
+    }
 
-        char ipbuf[INET_ADDRSTRLEN] = {0};
-        struct in_addr a = { .s_addr = wc->dst_ip };
-        inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
+    last_total_dropped = fwd->total_dropped;
+    last_dropped_bad_ip = fwd->dropped_bad_ip;
+    last_dropped_no_local_match = fwd->dropped_no_local_match;
+    last_dropped_local_tx_fail = fwd->dropped_local_tx_fail;
+    last_tx_wait_loops = tx_wait_loops;
 
-        uint8_t mac[6];
-        if (arp_cache_lookup(&g_wan_arp[w], wc->dst_ip, mac)) {
-            fprintf(stdout,
-                    "[WAN ARP] if=%s peer=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
-                    fwd->wans[w].ifname, ipbuf,
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        } else {
-            fprintf(stdout, "[WAN ARP] if=%s peer=%s dest_mac=UNRESOLVED\n",
-                    fwd->wans[w].ifname, ipbuf);
+    /* WAN ARP logging is noisy; print it periodically only. */
+    {
+        static time_t last_arp_print = 0;
+        int do_arp = (now - last_arp_print) >= 10;
+        if (do_arp)
+            last_arp_print = now;
+
+        if (do_arp) {
+            for (int w = 0; w < fwd->wan_count; w++) {
+                const struct wan_config *wc = &fwd->cfg->wans[w];
+                if (wc->dst_ip == 0) {
+                    fprintf(stdout, "[WAN ARP] if=%s peer ARP=disabled (static/fallback path)\n",
+                            fwd->wans[w].ifname);
+                    continue;
+                }
+
+                char ipbuf[INET_ADDRSTRLEN] = {0};
+                struct in_addr a = { .s_addr = wc->dst_ip };
+                inet_ntop(AF_INET, &a, ipbuf, sizeof(ipbuf));
+
+                uint8_t mac[6];
+                if (arp_cache_lookup(&g_wan_arp[w], wc->dst_ip, mac)) {
+                    fprintf(stdout,
+                            "[WAN ARP] if=%s peer=%s dest_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                            fwd->wans[w].ifname, ipbuf,
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                } else {
+                    fprintf(stdout, "[WAN ARP] if=%s peer=%s dest_mac=UNRESOLVED\n",
+                            fwd->wans[w].ifname, ipbuf);
+                }
+            }
         }
     }
 }
