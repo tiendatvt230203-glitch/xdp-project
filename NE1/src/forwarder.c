@@ -559,6 +559,53 @@ static void *wan_queue_thread_no_crypto(void *arg) {
 
             int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
             if (local_idx < 0) {
+                static time_t last_no_local_debug = 0;
+                time_t now = time(NULL);
+                if (now - last_no_local_debug >= 1) {
+                    last_no_local_debug = now;
+
+                    char dest_str[INET_ADDRSTRLEN] = {0};
+                    struct in_addr da = { .s_addr = dest_ip };
+                    inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
+
+                    const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
+                                                       ? &fwd->cfg->locals[0]
+                                                       : NULL;
+                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
+                                                       ? &fwd->cfg->locals[1]
+                                                       : NULL;
+
+                    char l0_net[INET_ADDRSTRLEN] = {0};
+                    char l0_mask[INET_ADDRSTRLEN] = {0};
+                    int l0_ok = 0;
+                    if (l0) {
+                        struct in_addr na = { .s_addr = l0->network };
+                        struct in_addr ma = { .s_addr = l0->netmask };
+                        inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
+                        inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
+                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                    }
+
+                    char l1_net[INET_ADDRSTRLEN] = {0};
+                    char l1_mask[INET_ADDRSTRLEN] = {0};
+                    int l1_ok = 0;
+                    if (l1) {
+                        struct in_addr na = { .s_addr = l1->network };
+                        struct in_addr ma = { .s_addr = l1->netmask };
+                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
+                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
+                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    }
+
+                    fprintf(stdout,
+                            "[NO_LOCAL_MATCH path=wan_no_crypto t=%ld] dest=%s(0x%08x) local_count=%d; "
+                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            (long)now,
+                            dest_str, dest_ip,
+                            fwd && fwd->cfg ? fwd->cfg->local_count : 0,
+                            l0_net, l0_mask, l0_ok,
+                            l1_net, l1_mask, l1_ok);
+                }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
                 continue;
@@ -853,6 +900,53 @@ static void *wan_queue_thread_l2(void *arg) {
 
             int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
             if (local_idx < 0) {
+                static time_t last_no_local_debug = 0;
+                time_t now = time(NULL);
+                if (now - last_no_local_debug >= 1) {
+                    last_no_local_debug = now;
+
+                    char dest_str[INET_ADDRSTRLEN] = {0};
+                    struct in_addr da = { .s_addr = dest_ip };
+                    inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
+
+                    const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
+                                                       ? &fwd->cfg->locals[0]
+                                                       : NULL;
+                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
+                                                       ? &fwd->cfg->locals[1]
+                                                       : NULL;
+
+                    char l0_net[INET_ADDRSTRLEN] = {0};
+                    char l0_mask[INET_ADDRSTRLEN] = {0};
+                    int l0_ok = 0;
+                    if (l0) {
+                        struct in_addr na = { .s_addr = l0->network };
+                        struct in_addr ma = { .s_addr = l0->netmask };
+                        inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
+                        inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
+                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                    }
+
+                    char l1_net[INET_ADDRSTRLEN] = {0};
+                    char l1_mask[INET_ADDRSTRLEN] = {0};
+                    int l1_ok = 0;
+                    if (l1) {
+                        struct in_addr na = { .s_addr = l1->network };
+                        struct in_addr ma = { .s_addr = l1->netmask };
+                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
+                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
+                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    }
+
+                    fprintf(stdout,
+                            "[NO_LOCAL_MATCH path=wan_l2 t=%ld] dest=%s(0x%08x) local_count=%d; "
+                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            (long)now,
+                            dest_str, dest_ip,
+                            fwd && fwd->cfg ? fwd->cfg->local_count : 0,
+                            l0_net, l0_mask, l0_ok,
+                            l1_net, l1_mask, l1_ok);
+                }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
                 continue;
@@ -1008,6 +1102,53 @@ static void *wan_queue_thread_l3l4(void *arg) {
 
             int local_idx = config_find_local_for_ip(fwd->cfg, dest_ip);
             if (local_idx < 0) {
+                static time_t last_no_local_debug = 0;
+                time_t now = time(NULL);
+                if (now - last_no_local_debug >= 1) {
+                    last_no_local_debug = now;
+
+                    char dest_str[INET_ADDRSTRLEN] = {0};
+                    struct in_addr da = { .s_addr = dest_ip };
+                    inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
+
+                    const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
+                                                       ? &fwd->cfg->locals[0]
+                                                       : NULL;
+                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
+                                                       ? &fwd->cfg->locals[1]
+                                                       : NULL;
+
+                    char l0_net[INET_ADDRSTRLEN] = {0};
+                    char l0_mask[INET_ADDRSTRLEN] = {0};
+                    int l0_ok = 0;
+                    if (l0) {
+                        struct in_addr na = { .s_addr = l0->network };
+                        struct in_addr ma = { .s_addr = l0->netmask };
+                        inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
+                        inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
+                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                    }
+
+                    char l1_net[INET_ADDRSTRLEN] = {0};
+                    char l1_mask[INET_ADDRSTRLEN] = {0};
+                    int l1_ok = 0;
+                    if (l1) {
+                        struct in_addr na = { .s_addr = l1->network };
+                        struct in_addr ma = { .s_addr = l1->netmask };
+                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
+                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
+                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    }
+
+                    fprintf(stdout,
+                            "[NO_LOCAL_MATCH path=wan_l3l4 t=%ld] dest=%s(0x%08x) local_count=%d; "
+                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            (long)now,
+                            dest_str, dest_ip,
+                            fwd && fwd->cfg ? fwd->cfg->local_count : 0,
+                            l0_net, l0_mask, l0_ok,
+                            l1_net, l1_mask, l1_ok);
+                }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
                 continue;
