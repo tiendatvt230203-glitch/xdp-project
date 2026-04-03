@@ -584,10 +584,14 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                     }
 
                     char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    char src_parse_str[INET_ADDRSTRLEN] = {0};
                     if (parse_ok) {
+                        struct in_addr sa2 = { .s_addr = src_ip_pf };
                         struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &sa2, src_parse_str, sizeof(src_parse_str));
                         inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
                     } else {
+                        snprintf(src_parse_str, sizeof(src_parse_str), "NA");
                         snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
                     }
 
@@ -1193,10 +1197,14 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     }
 
                     char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    char src_parse_str[INET_ADDRSTRLEN] = {0};
                     if (parse_ok) {
+                        struct in_addr sa2 = { .s_addr = src_ip_pf };
                         struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &sa2, src_parse_str, sizeof(src_parse_str));
                         inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
                     } else {
+                        snprintf(src_parse_str, sizeof(src_parse_str), "NA");
                         snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
                     }
 
