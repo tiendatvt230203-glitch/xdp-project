@@ -570,43 +570,66 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                     struct in_addr da = { .s_addr = dest_ip };
                     inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
 
+                    /* Root-cause check:
+                     * 1) get_dest_ip() vs parse_flow() might read different IPv4 daddr if L2 offset is wrong
+                     * 2) if both agree, then it's a plain CIDR mismatch with local networks
+                     */
+                    uint32_t src_ip_pf = 0, dst_ip_pf = 0;
+                    uint16_t src_port_pf = 0, dst_port_pf = 0;
+                    uint8_t protocol_pf = 0;
+                    int parse_ok = (parse_flow(pkt, pkt_len,
+                                                &src_ip_pf, &dst_ip_pf,
+                                                &src_port_pf, &dst_port_pf,
+                                                &protocol_pf) == 0);
+
+                    int local_idx_parse = -1;
+                    if (parse_ok) {
+                        local_idx_parse = config_find_local_for_ip(fwd->cfg, dst_ip_pf);
+                    }
+
+                    char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    if (parse_ok) {
+                        struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
+                    } else {
+                        snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
+                    }
+
                     const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
                                                        ? &fwd->cfg->locals[0]
                                                        : NULL;
-                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
-                                                       ? &fwd->cfg->locals[1]
-                                                       : NULL;
-
                     char l0_net[INET_ADDRSTRLEN] = {0};
                     char l0_mask[INET_ADDRSTRLEN] = {0};
-                    int l0_ok = 0;
+                    int l0_used_ok = 0;
+                    int l0_parse_ok = 0;
                     if (l0) {
                         struct in_addr na = { .s_addr = l0->network };
                         struct in_addr ma = { .s_addr = l0->netmask };
                         inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
                         inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
-                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                        l0_used_ok = ((dest_ip & l0->netmask) == l0->network);
+                        if (parse_ok)
+                            l0_parse_ok = ((dst_ip_pf & l0->netmask) == l0->network);
                     }
 
-                    char l1_net[INET_ADDRSTRLEN] = {0};
-                    char l1_mask[INET_ADDRSTRLEN] = {0};
-                    int l1_ok = 0;
-                    if (l1) {
-                        struct in_addr na = { .s_addr = l1->network };
-                        struct in_addr ma = { .s_addr = l1->netmask };
-                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
-                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
-                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    const char *cause = NULL;
+                    if (parse_ok) {
+                        cause = (local_idx_parse >= 0)
+                                    ? "CAUSE=dest_extraction_mismatch:get_dest_ip!=parse_flow"
+                                    : "CAUSE=cidr_mismatch:dst_ip not in local networks";
+                    } else {
+                        cause = "CAUSE=parse_flow_failed:cannot validate dst_ip";
                     }
 
                     fprintf(stdout,
-                            "[NO_LOCAL_MATCH path=wan_no_crypto t=%ld] dest=%s(0x%08x) local_count=%d; "
-                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            "[NO_LOCAL_MATCH %s path=wan_no_crypto t=%ld] dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
+                            cause,
                             (long)now,
                             dest_str, dest_ip,
+                            dst_parse_str, parse_ok ? dst_ip_pf : 0,
+                            local_idx_parse,
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
-                            l0_net, l0_mask, l0_ok,
-                            l1_net, l1_mask, l1_ok);
+                            l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
@@ -911,43 +934,66 @@ static void *wan_queue_thread_l2(void *arg) {
                     struct in_addr da = { .s_addr = dest_ip };
                     inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
 
+                    /* Root-cause check:
+                     * - get_dest_ip() vs parse_flow() might read different IPv4 daddr if L2 offset is wrong
+                     * - if they agree, it's a CIDR mismatch with local networks
+                     */
+                    uint32_t src_ip_pf = 0, dst_ip_pf = 0;
+                    uint16_t src_port_pf = 0, dst_port_pf = 0;
+                    uint8_t protocol_pf = 0;
+                    int parse_ok = (parse_flow(final_pkt, final_len,
+                                                &src_ip_pf, &dst_ip_pf,
+                                                &src_port_pf, &dst_port_pf,
+                                                &protocol_pf) == 0);
+
+                    int local_idx_parse = -1;
+                    if (parse_ok) {
+                        local_idx_parse = config_find_local_for_ip(fwd->cfg, dst_ip_pf);
+                    }
+
+                    char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    if (parse_ok) {
+                        struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
+                    } else {
+                        snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
+                    }
+
                     const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
                                                        ? &fwd->cfg->locals[0]
                                                        : NULL;
-                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
-                                                       ? &fwd->cfg->locals[1]
-                                                       : NULL;
-
                     char l0_net[INET_ADDRSTRLEN] = {0};
                     char l0_mask[INET_ADDRSTRLEN] = {0};
-                    int l0_ok = 0;
+                    int l0_used_ok = 0;
+                    int l0_parse_ok = 0;
                     if (l0) {
                         struct in_addr na = { .s_addr = l0->network };
                         struct in_addr ma = { .s_addr = l0->netmask };
                         inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
                         inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
-                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                        l0_used_ok = ((dest_ip & l0->netmask) == l0->network);
+                        if (parse_ok)
+                            l0_parse_ok = ((dst_ip_pf & l0->netmask) == l0->network);
                     }
 
-                    char l1_net[INET_ADDRSTRLEN] = {0};
-                    char l1_mask[INET_ADDRSTRLEN] = {0};
-                    int l1_ok = 0;
-                    if (l1) {
-                        struct in_addr na = { .s_addr = l1->network };
-                        struct in_addr ma = { .s_addr = l1->netmask };
-                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
-                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
-                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    const char *cause = NULL;
+                    if (parse_ok) {
+                        cause = (local_idx_parse >= 0)
+                                    ? "CAUSE=dest_extraction_mismatch:get_dest_ip!=parse_flow"
+                                    : "CAUSE=cidr_mismatch:dst_ip not in local networks";
+                    } else {
+                        cause = "CAUSE=parse_flow_failed:cannot validate dst_ip";
                     }
 
                     fprintf(stdout,
-                            "[NO_LOCAL_MATCH path=wan_l2 t=%ld] dest=%s(0x%08x) local_count=%d; "
-                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            "[NO_LOCAL_MATCH %s path=wan_l2 t=%ld] dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
+                            cause,
                             (long)now,
                             dest_str, dest_ip,
+                            dst_parse_str, parse_ok ? dst_ip_pf : 0,
+                            local_idx_parse,
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
-                            l0_net, l0_mask, l0_ok,
-                            l1_net, l1_mask, l1_ok);
+                            l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
@@ -1113,43 +1159,66 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     struct in_addr da = { .s_addr = dest_ip };
                     inet_ntop(AF_INET, &da, dest_str, sizeof(dest_str));
 
+                    /* Root-cause check:
+                     * - get_dest_ip() vs parse_flow() might read different IPv4 daddr if L2 offset is wrong
+                     * - if they agree, then the CIDR local networks don't cover dst_ip
+                     */
+                    uint32_t src_ip_pf = 0, dst_ip_pf = 0;
+                    uint16_t src_port_pf = 0, dst_port_pf = 0;
+                    uint8_t protocol_pf = 0;
+                    int parse_ok = (parse_flow(final_pkt, final_len,
+                                                &src_ip_pf, &dst_ip_pf,
+                                                &src_port_pf, &dst_port_pf,
+                                                &protocol_pf) == 0);
+
+                    int local_idx_parse = -1;
+                    if (parse_ok) {
+                        local_idx_parse = config_find_local_for_ip(fwd->cfg, dst_ip_pf);
+                    }
+
+                    char dst_parse_str[INET_ADDRSTRLEN] = {0};
+                    if (parse_ok) {
+                        struct in_addr da2 = { .s_addr = dst_ip_pf };
+                        inet_ntop(AF_INET, &da2, dst_parse_str, sizeof(dst_parse_str));
+                    } else {
+                        snprintf(dst_parse_str, sizeof(dst_parse_str), "NA");
+                    }
+
                     const struct local_config *l0 = (fwd && fwd->cfg && fwd->cfg->local_count > 0)
                                                        ? &fwd->cfg->locals[0]
                                                        : NULL;
-                    const struct local_config *l1 = (fwd && fwd->cfg && fwd->cfg->local_count > 1)
-                                                       ? &fwd->cfg->locals[1]
-                                                       : NULL;
-
                     char l0_net[INET_ADDRSTRLEN] = {0};
                     char l0_mask[INET_ADDRSTRLEN] = {0};
-                    int l0_ok = 0;
+                    int l0_used_ok = 0;
+                    int l0_parse_ok = 0;
                     if (l0) {
                         struct in_addr na = { .s_addr = l0->network };
                         struct in_addr ma = { .s_addr = l0->netmask };
                         inet_ntop(AF_INET, &na, l0_net, sizeof(l0_net));
                         inet_ntop(AF_INET, &ma, l0_mask, sizeof(l0_mask));
-                        l0_ok = ((dest_ip & l0->netmask) == l0->network);
+                        l0_used_ok = ((dest_ip & l0->netmask) == l0->network);
+                        if (parse_ok)
+                            l0_parse_ok = ((dst_ip_pf & l0->netmask) == l0->network);
                     }
 
-                    char l1_net[INET_ADDRSTRLEN] = {0};
-                    char l1_mask[INET_ADDRSTRLEN] = {0};
-                    int l1_ok = 0;
-                    if (l1) {
-                        struct in_addr na = { .s_addr = l1->network };
-                        struct in_addr ma = { .s_addr = l1->netmask };
-                        inet_ntop(AF_INET, &na, l1_net, sizeof(l1_net));
-                        inet_ntop(AF_INET, &ma, l1_mask, sizeof(l1_mask));
-                        l1_ok = ((dest_ip & l1->netmask) == l1->network);
+                    const char *cause = NULL;
+                    if (parse_ok) {
+                        cause = (local_idx_parse >= 0)
+                                    ? "CAUSE=dest_extraction_mismatch:get_dest_ip!=parse_flow"
+                                    : "CAUSE=cidr_mismatch:dst_ip not in local networks";
+                    } else {
+                        cause = "CAUSE=parse_flow_failed:cannot validate dst_ip";
                     }
 
                     fprintf(stdout,
-                            "[NO_LOCAL_MATCH path=wan_l3l4 t=%ld] dest=%s(0x%08x) local_count=%d; "
-                            "l0=%s/%s ok=%d; l1=%s/%s ok=%d\n",
+                            "[NO_LOCAL_MATCH %s path=wan_l3l4 t=%ld] dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
+                            cause,
                             (long)now,
                             dest_str, dest_ip,
+                            dst_parse_str, parse_ok ? dst_ip_pf : 0,
+                            local_idx_parse,
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
-                            l0_net, l0_mask, l0_ok,
-                            l1_net, l1_mask, l1_ok);
+                            l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
                 __sync_fetch_and_add(&fwd->total_dropped, 1);
                 __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
