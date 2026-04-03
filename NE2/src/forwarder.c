@@ -502,7 +502,7 @@ static void *local_queue_thread_no_crypto(void *arg) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
 
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_LOCAL_NC_SET_WAN_L2);
                 continue;
             }
 
@@ -510,7 +510,7 @@ static void *local_queue_thread_no_crypto(void *arg) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_LOCAL_NC_WAN_TX);
             }
         }
 
@@ -554,8 +554,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
 
             uint32_t dest_ip = get_dest_ip(pkt, pkt_len);
             if (dest_ip == 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_bad_ip, 1);
+                FWD_DROP_BAD_IP(fwd, FWD_DR_WAN_NC_BAD_IP);
                 continue;
             }
 
@@ -631,8 +630,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
                             l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                FWD_DROP_NO_LOCAL(fwd, FWD_DR_WAN_NC_NO_LOCAL);
                 continue;
             }
 
@@ -659,7 +657,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                 memcpy(pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
                 arp_send_request(&g_arp[local_idx], dest_ip);
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_NC_ARP_MISS);
                 interface_recv_release_single_queue(wan, queue_idx, &addrs[i], 1);
                 continue;
             }
@@ -668,8 +666,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                 __sync_fetch_and_add(&fwd->wan_to_local, 1);
                 local_used_queues[local_idx] |= (1u << tq);
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_local_tx_fail, 1);
+                FWD_DROP_LOCAL_TX(fwd, FWD_DR_WAN_NC_LOCAL_TX);
             }
         }
 
@@ -740,7 +737,7 @@ static void *local_queue_thread_l2(void *arg) {
             uint8_t *pkt = (uint8_t *)pkt_ptrs[i];
 
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_LOCAL_L2_SET_WAN_L2);
                 continue;
             }
 
@@ -777,12 +774,12 @@ static void *local_queue_thread_l2(void *arg) {
                     __sync_fetch_and_add(&fwd->local_to_wan, 1);
                     wan_used[wan_idx] = 1;
                 } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    FWD_DROP(fwd, FWD_DR_LOCAL_L2_BYPASS_TX);
                 }
                 continue;
             }
             if (encrypt_packet_with_ctx(use_ctx, pkt_ptrs[i], &pkt_len) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_LOCAL_L2_ENCRYPT_FAIL);
                 continue;
             }
 
@@ -790,7 +787,7 @@ static void *local_queue_thread_l2(void *arg) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_LOCAL_L2_WAN_TX);
             }
         }
 
@@ -865,7 +862,7 @@ static void *local_queue_thread_l3l4(void *arg) {
             pthread_mutex_unlock(&ring->lock);
 
             if (!enqueued) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_L3L4_RING_FULL);
                 interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
             }
         }
@@ -909,7 +906,7 @@ static void *wan_queue_thread_l2(void *arg) {
 
             if (decrypt_packet_auto_l2(fwd, pkt, &pkt_len,
                                         decrypt_scratch, sizeof(decrypt_scratch)) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_L2_DECRYPT);
                 continue;
             }
             final_pkt = pkt;
@@ -918,8 +915,7 @@ static void *wan_queue_thread_l2(void *arg) {
 
             uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
             if (dest_ip == 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_bad_ip, 1);
+                FWD_DROP_BAD_IP(fwd, FWD_DR_WAN_L2_BAD_IP);
                 continue;
             }
 
@@ -995,8 +991,7 @@ static void *wan_queue_thread_l2(void *arg) {
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
                             l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                FWD_DROP_NO_LOCAL(fwd, FWD_DR_WAN_L2_NO_LOCAL);
                 continue;
             }
 
@@ -1046,7 +1041,7 @@ static void *wan_queue_thread_l2(void *arg) {
                 memcpy(final_pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
                 arp_send_request(&g_arp[local_idx], dest_ip);
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_L2_ARP_MISS);
                 continue;
             }
 
@@ -1055,8 +1050,7 @@ static void *wan_queue_thread_l2(void *arg) {
                 if (tq < 32)
                     local_used_queues[local_idx] |= (1u << tq);
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_local_tx_fail, 1);
+                FWD_DROP_LOCAL_TX(fwd, FWD_DR_WAN_L2_LOCAL_TX);
             }
         }
 
@@ -1140,7 +1134,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                     if (decrypt_packet_auto_l2(fwd, pkt, &pkt_len,
                                                decrypt_scratch,
                                                sizeof(decrypt_scratch)) != 0) {
-                        __sync_fetch_and_add(&fwd->total_dropped, 1);
+                        FWD_DROP(fwd, FWD_DR_WAN_L3L4_L2_DECRYPT);
                         continue;
                     }
                 }
@@ -1150,7 +1144,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                                                 POLICY_ACTION_ENCRYPT_L3,
                                                 decrypt_scratch,
                                                 sizeof(decrypt_scratch)) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_L3L4_L3_DECRYPT);
                 continue;
             }
 
@@ -1158,7 +1152,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                                                 POLICY_ACTION_ENCRYPT_L4,
                                                 decrypt_scratch,
                                                 sizeof(decrypt_scratch)) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_L3L4_L4_DECRYPT);
                 continue;
             }
             final_pkt = pkt;
@@ -1167,8 +1161,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
 
             uint32_t dest_ip = get_dest_ip(final_pkt, final_len);
             if (dest_ip == 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_bad_ip, 1);
+                FWD_DROP_BAD_IP(fwd, FWD_DR_WAN_L3L4_BAD_IP);
                 continue;
             }
 
@@ -1238,17 +1231,16 @@ static void *wan_queue_thread_l3l4(void *arg) {
                             "[NO_LOCAL_MATCH %s path=wan_l3l4 t=%ld] src=%s:%u dst=%s:%u proto=%u len=%u | dest_used=%s(0x%08x) dst_parse=%s(0x%08x) local_idx_parse=%d local_count=%d l0=%s/%s used_ok=%d parse_ok=%d\n",
                             cause,
                             (long)now,
-                            dest_str, dest_ip,
                             src_parse_str, (unsigned)src_port_pf,
                             dst_parse_str, (unsigned)dst_port_pf,
                             (unsigned)protocol_pf, (unsigned)final_len,
+                            dest_str, dest_ip,
                             dst_parse_str, parse_ok ? dst_ip_pf : 0,
                             local_idx_parse,
                             fwd && fwd->cfg ? fwd->cfg->local_count : 0,
                             l0_net, l0_mask, l0_used_ok, l0_parse_ok);
                 }
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_no_local_match, 1);
+                FWD_DROP_NO_LOCAL(fwd, FWD_DR_WAN_L3L4_NO_LOCAL);
                 continue;
             }
 
@@ -1274,7 +1266,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                 memcpy(final_pkt + 6, g_arp[local_idx].if_mac, 6);
             } else {
                 arp_send_request(&g_arp[local_idx], dest_ip);
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WAN_L3L4_ARP_MISS);
                 continue;
             }
 
@@ -1283,8 +1275,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                 if (tq < 32)
                     local_used_queues[local_idx] |= (1u << tq);
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
-                __sync_fetch_and_add(&fwd->dropped_local_tx_fail, 1);
+                FWD_DROP_LOCAL_TX(fwd, FWD_DR_WAN_L3L4_LOCAL_TX);
             }
         }
 
@@ -1399,7 +1390,7 @@ static void *worker_thread(void *arg) {
             if (bypass_crypto) {
                 uint8_t *pkt = (uint8_t *)job.pkt_ptr;
                 if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    FWD_DROP(fwd, FWD_DR_WORKER_BYPASS_SET_WAN_L2);
                     goto release_local;
                 }
 
@@ -1407,7 +1398,7 @@ static void *worker_thread(void *arg) {
                     __sync_fetch_and_add(&fwd->local_to_wan, 1);
                     wan_used[wan_idx] = 1;
                 } else {
-                    __sync_fetch_and_add(&fwd->total_dropped, 1);
+                    FWD_DROP(fwd, FWD_DR_WORKER_BYPASS_TX);
                 }
                 goto skip_encrypt_flush;
             }
@@ -1416,7 +1407,7 @@ static void *worker_thread(void *arg) {
         if (!crypto_enabled) {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WORKER_NOC_SET_WAN_L2);
                 goto release_local;
             }
 
@@ -1424,12 +1415,12 @@ static void *worker_thread(void *arg) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WORKER_NOC_TX);
             }
         } else {
             uint8_t *pkt = (uint8_t *)job.pkt_ptr;
             if (set_wan_l2_addrs(fwd, wan_idx, pkt) != 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WORKER_ENC_SET_WAN_L2);
                 goto release_local;
             }
 
@@ -1445,7 +1436,7 @@ static void *worker_thread(void *arg) {
             }
 
             if (new_len < 0) {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WORKER_ENC_FAIL);
                 goto release_local;
             }
             pkt_len = (uint32_t)new_len;
@@ -1454,7 +1445,7 @@ static void *worker_thread(void *arg) {
                 __sync_fetch_and_add(&fwd->local_to_wan, 1);
                 wan_used[wan_idx] = 1;
             } else {
-                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                FWD_DROP(fwd, FWD_DR_WORKER_ENC_TX);
             }
         }
 
@@ -2030,6 +2021,7 @@ void forwarder_print_stats(struct forwarder *fwd) {
     static uint64_t last_dropped_bad_ip = 0;
     static uint64_t last_dropped_no_local_match = 0;
     static uint64_t last_dropped_local_tx_fail = 0;
+    static uint64_t last_dropped_by_reason[FWD_DROP_REASON_COUNT];
     static uint64_t last_tx_wait_loops = 0;
 
     int nq = (fwd->local_count > 0 && fwd->locals[0].queue_count <= FORWARDER_MAX_LOCAL_QUEUES)
@@ -2072,12 +2064,22 @@ void forwarder_print_stats(struct forwarder *fwd) {
                 (unsigned long)delta_no_local,
                 (unsigned long)delta_local_tx_fail,
                 (unsigned long)delta_tx_wait_loops);
+        fprintf(stdout, "[DROP_REASONS t=%ld]", (long)now);
+        for (int r = 0; r < FWD_DROP_REASON_COUNT; r++) {
+            uint64_t dr = fwd->dropped_by_reason[r] - last_dropped_by_reason[r];
+            if (dr)
+                fprintf(stdout, " %s=+%lu", fwd_drop_reason_tag((enum fwd_drop_reason)r),
+                        (unsigned long)dr);
+        }
+        fprintf(stdout, "\n");
     }
 
     last_total_dropped = fwd->total_dropped;
     last_dropped_bad_ip = fwd->dropped_bad_ip;
     last_dropped_no_local_match = fwd->dropped_no_local_match;
     last_dropped_local_tx_fail = fwd->dropped_local_tx_fail;
+    for (int r = 0; r < FWD_DROP_REASON_COUNT; r++)
+        last_dropped_by_reason[r] = fwd->dropped_by_reason[r];
     last_tx_wait_loops = tx_wait_loops;
 
     /* WAN ARP logging is noisy; print it periodically only. */
